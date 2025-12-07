@@ -3,7 +3,6 @@ package com.example.playit
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 
-// Gemini-fixed: Re-created missing file.
 object OpenSubtitlesClient {
     private const val BASE_URL = "https://api.opensubtitles.com/api/v1/"
 

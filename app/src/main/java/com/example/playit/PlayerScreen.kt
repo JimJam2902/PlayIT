@@ -35,7 +35,7 @@ fun PlayerScreen(
     val isPlaying by viewModel.isPlaying.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
 
-    var areControlsVisible by remember { mutableStateOf(true) }
+    var areControlsVisible by remember { mutableStateOf(false) }
     val playPauseFocusRequester = remember { FocusRequester() }
 
     // Track last user interaction to reset autohide timer
@@ -152,9 +152,12 @@ fun PlayerScreen(
                     lastProcessedKeyMs = now
                     return@onPreviewKeyEvent true
                 }
-                // remember this key as processed
-                lastProcessedKeyCode = keyCode
-                lastProcessedKeyMs = now
+                // remember this key as processed (but allow key repeats for seeking)
+                if (native.keyCode != android.view.KeyEvent.KEYCODE_DPAD_LEFT &&
+                    native.keyCode != android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    lastProcessedKeyCode = keyCode
+                    lastProcessedKeyMs = now
+                }
 
                 // BACK: if child dialog is open, let the child handle it (so the dialog dismisses instead of exiting)
                 if (native.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
@@ -183,26 +186,23 @@ fun PlayerScreen(
                             return@onPreviewKeyEvent true
                         }
                         android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                            // Fast forward even when controls are hidden
+                            // Fast forward even when controls are hidden - don't show controls
                             viewModel.player?.let { p ->
                                 val newPos = (p.currentPosition + SEEK_MS).coerceAtMost(p.duration)
                                 p.seekTo(newPos)
                                 Log.d("PlayerScreen", "onPreviewKeyEvent: hidden -> DPAD_RIGHT seek to $newPos")
                             }
-                            // Also show controls to give feedback
-                            areControlsVisible = true
-                            lastInteractionMs = now
+                            // DON'T show controls - let user seek continuously without interruption
                             return@onPreviewKeyEvent true
                         }
                         android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
-                            // Rewind even when controls are hidden
+                            // Rewind even when controls are hidden - don't show controls
                             viewModel.player?.let { p ->
                                 val newPos = (p.currentPosition - SEEK_MS).coerceAtLeast(0L)
                                 p.seekTo(newPos)
                                 Log.d("PlayerScreen", "onPreviewKeyEvent: hidden -> DPAD_LEFT seek to $newPos")
                             }
-                            areControlsVisible = true
-                            lastInteractionMs = now
+                            // DON'T show controls - let user seek continuously without interruption
                             return@onPreviewKeyEvent true
                         }
                         android.view.KeyEvent.KEYCODE_DPAD_CENTER, android.view.KeyEvent.KEYCODE_ENTER -> {

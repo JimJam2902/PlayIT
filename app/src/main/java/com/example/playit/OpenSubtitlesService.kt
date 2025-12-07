@@ -18,7 +18,13 @@ data class LoginRequest(
 )
 
 data class LoginResponse(
-    val token: String
+    val token: String,
+    val user: UserInfo? = null
+)
+
+data class UserInfo(
+    val user_id: Long? = null,
+    val username: String? = null
 )
 
 data class SubtitleSearchResponse(
@@ -69,7 +75,7 @@ interface OpenSubtitlesService {
     suspend fun login(
         @Header(API_KEY_HEADER) apiKey: String,
         @Body loginRequest: LoginRequest
-    ): LoginResponse
+    ): Response<LoginResponse>
 
     @GET("subtitles")
     suspend fun search(

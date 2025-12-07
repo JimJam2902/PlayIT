@@ -32,6 +32,8 @@ class SettingsRepository(context: Context) {
     companion object {
         private const val KEY_OS_USERNAME = "opensubtitles_username"
         private const val KEY_OS_PASSWORD = "opensubtitles_password"
+        private const val KEY_OS_API_KEY = "opensubtitles_api_key"
+        private const val KEY_OS_PROVIDER = "opensubtitles_provider"
     }
 
     fun saveOpenSubtitlesCredentials(username: String, password: String) {
@@ -45,10 +47,28 @@ class SettingsRepository(context: Context) {
     fun getOpenSubtitlesUsername(): String? = prefs.getString(KEY_OS_USERNAME, null)
     fun getOpenSubtitlesPassword(): String? = prefs.getString(KEY_OS_PASSWORD, null)
 
+    fun saveOpenSubtitlesApiKey(apiKey: String) {
+        prefs.edit(commit = true) {
+            putString(KEY_OS_API_KEY, apiKey)
+        }
+    }
+
+    fun getOpenSubtitlesApiKey(): String? = prefs.getString(KEY_OS_API_KEY, null)
+
+    fun saveOpenSubtitlesProvider(provider: String) {
+        prefs.edit(commit = true) {
+            putString(KEY_OS_PROVIDER, provider)
+        }
+    }
+
+    fun getOpenSubtitlesProvider(): String? = prefs.getString(KEY_OS_PROVIDER, null)
+
     fun clearOpenSubtitlesCredentials() {
         prefs.edit(commit = true) {
             remove(KEY_OS_USERNAME)
             remove(KEY_OS_PASSWORD)
+            remove(KEY_OS_API_KEY)
+            remove(KEY_OS_PROVIDER)
         }
     }
 }

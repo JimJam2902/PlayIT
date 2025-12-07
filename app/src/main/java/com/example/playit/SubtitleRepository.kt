@@ -16,8 +16,26 @@ class SubtitleRepository(private val context: Context) {
 
     private val service: OpenSubtitlesService = OpenSubtitlesClient.instance
 
-    // Public OpenSubtitles API key (fallback to BuildConfig if available)
-    private val apiKey: String = "iSFvVbtm0AEl9yODbmIBSy3uTan2X0Aq"
+    // API selection - users can switch between .com and .org
+    enum class ApiProvider { COM, ORG }
+
+    // Get API provider preference - default to ORG (no auth needed)
+    private fun getApiProvider(): ApiProvider {
+        val provider = settingsRepo.getOpenSubtitlesProvider()
+        return if (provider == "COM") ApiProvider.COM else ApiProvider.ORG
+    }
+
+    // Get API key - prefer custom saved key, fallback to default
+    private fun getApiKey(): String {
+        val customKey = settingsRepo.getOpenSubtitlesApiKey()
+        return if (customKey?.isNotEmpty() == true) customKey else DEFAULT_API_KEY
+    }
+
+    companion object {
+        // Default API key - get your own at https://www.opensubtitles.com/api
+        private const val DEFAULT_API_KEY = "iSFvVbtm0AEl9yODbmIBSy3uTan2X0Aq"
+    }
+
     private var authToken: String? = null
 
     // Login status exposed to UI
@@ -29,6 +47,16 @@ class SubtitleRepository(private val context: Context) {
     private val settingsRepo = SettingsRepository(context)
 
     private suspend fun ensureLoggedIn() {
+        val provider = getApiProvider()
+
+        // If using OpenSubtitles.org, no login needed
+        if (provider == ApiProvider.ORG) {
+            _loginStatus.value = LoginStatus.LOGGED_IN
+            Log.d("SubtitleRepository", "Using OpenSubtitles.org API (no authentication required)")
+            return
+        }
+
+        // For .com API, require login
         // If we already have a token, assume logged in
         if (!authToken.isNullOrEmpty()) {
             _loginStatus.value = LoginStatus.LOGGED_IN
@@ -56,7 +84,17 @@ class SubtitleRepository(private val context: Context) {
 
         _loginStatus.value = LoginStatus.LOGGING_IN
         try {
-            Log.d("SubtitleRepository", "Sending login request to OpenSubtitles API with key: ${apiKey.take(10)}...")
+            val apiKey = getApiKey()
+
+            // Validate API key format
+            if (apiKey.length < 20) {
+                Log.e("SubtitleRepository", "API key appears too short (${apiKey.length} chars). Please check your API key.")
+                _loginStatus.value = LoginStatus.FAILED
+                return
+            }
+
+            Log.d("SubtitleRepository", "Using API key: ${apiKey.take(15)}... (${apiKey.length} chars)")
+            Log.d("SubtitleRepository", "Sending login request to OpenSubtitles API")
             val response = withTimeoutOrNull(10_000L) {
                 service.login(apiKey, LoginRequest(username, password))
             }
@@ -68,18 +106,57 @@ class SubtitleRepository(private val context: Context) {
                 return
             }
 
-            Log.d("SubtitleRepository", "Login response received, token present: ${response.token.isNotEmpty()}")
-            authToken = "Bearer ${response.token}"
+            // Check if HTTP response was successful
+            if (!response.isSuccessful) {
+                Log.e("SubtitleRepository", "OpenSubtitles login failed with HTTP ${response.code()}: ${response.message()}")
+
+                // Log the error body for debugging
+                try {
+                    val errorBody = response.errorBody()?.string()
+                    Log.e("SubtitleRepository", "Error response body: $errorBody")
+                } catch (e: Exception) {
+                    Log.e("SubtitleRepository", "Could not read error body: ${e.message}")
+                }
+
+                if (response.code() == 401 || response.code() == 403) {
+                    Log.e("SubtitleRepository", "Invalid credentials or API key - check username/password/API key")
+                }
+                _loginStatus.value = LoginStatus.FAILED
+                authToken = null
+                return
+            }
+
+            val loginResp = response.body()
+            if (loginResp == null) {
+                Log.e("SubtitleRepository", "Login response body is null")
+                _loginStatus.value = LoginStatus.FAILED
+                authToken = null
+                return
+            }
+
+            Log.d("SubtitleRepository", "Login response received, token: ${loginResp.token.take(20)}...")
+
+            // Check if token is empty
+            if (loginResp.token.isEmpty()) {
+                Log.e("SubtitleRepository", "Login response returned empty token")
+                _loginStatus.value = LoginStatus.FAILED
+                authToken = null
+                return
+            }
+
+            authToken = "Bearer ${loginResp.token}"
             _loginStatus.value = LoginStatus.LOGGED_IN
             Log.d("SubtitleRepository", "Successfully logged in to OpenSubtitles as $username")
         } catch (ex: Exception) {
             Log.e("SubtitleRepository", "OpenSubtitles login failed: ${ex.message}", ex)
+            // Print full stack trace for debugging
             ex.printStackTrace()
             // Keep authToken null on failure
             authToken = null
             _loginStatus.value = LoginStatus.FAILED
         }
     }
+
     /**
      * Attempts to login using currently saved credentials and updates loginStatus.
      * Returns true on success, false otherwise.
@@ -113,6 +190,7 @@ class SubtitleRepository(private val context: Context) {
     ): File? = withContext(Dispatchers.IO) {
         ensureLoggedIn()
 
+        val apiKey = getApiKey()
         val searchParams = mutableMapOf("query" to query, "languages" to language)
         tmdbId?.let { searchParams["tmdb_id"] = it }
         year?.let { searchParams["year"] = it.toString() }
@@ -164,6 +242,7 @@ class SubtitleRepository(private val context: Context) {
     ): List<Subtitle> = withContext(Dispatchers.IO) {
         ensureLoggedIn()
 
+        val apiKey = getApiKey()
         val searchParams = mutableMapOf("query" to query, "languages" to language)
         tmdbId?.let { searchParams["tmdb_id"] = it }
         year?.let { searchParams["year"] = it.toString() }
@@ -180,6 +259,7 @@ class SubtitleRepository(private val context: Context) {
     suspend fun downloadSubtitleByFileId(fileId: Long): File? = withContext(Dispatchers.IO) {
         ensureLoggedIn()
 
+        val apiKey = getApiKey()
         val downloadLink = try {
             val downloadRequest = DownloadRequest(fileId)
             service.requestDownload(apiKey, authToken ?: "", downloadRequest).link

@@ -11,7 +11,9 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
@@ -23,6 +25,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -68,11 +71,11 @@ fun SubtitleMenuPopup(
             usePlatformDefaultWidth = false
         )
     ) {
-        // Actual menu card
+        // Actual menu card - use scrollable column to handle keyboard
         Surface(
             modifier = Modifier
                 .width(550.dp)
-                .heightIn(min = 250.dp, max = 650.dp)
+                .heightIn(min = 250.dp, max = 700.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .onKeyEvent { event ->
                     if (event.nativeKeyEvent.action != AndroidKeyEvent.ACTION_DOWN) {
@@ -104,9 +107,62 @@ fun SubtitleMenuPopup(
                     fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
                 )
 
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(12.dp))
 
-                // Combined list (embedded + search results) - takes up available space
+                // Search row at TOP - stays visible above keyboard
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        label = { Text("Search subtitles") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(searchFieldFocusRequester),
+                        textStyle = LocalTextStyle.current.copy(
+                            fontSize = 14.sp
+                        )
+                    )
+
+                    Button(
+                        onClick = {
+                            if (searchQuery.isNotBlank()) {
+                                isSearching = true
+                                viewModel.searchSubtitles(searchQuery, "en", null, null) { results ->
+                                    @Suppress("ConvertMapNotNullToMapNotNull")
+                                    val mapped = results.mapNotNull { s ->
+                                        val fileId = s.attributes.files.firstOrNull()?.fileId
+                                        SubtitleEntry(
+                                            fileId = fileId,
+                                            language = s.attributes.language,
+                                            downloadCount = s.attributes.downloadCount,
+                                            source = "opensubtitles",
+                                            localFilePath = null,
+                                            displayLabel = "${s.attributes.language} (${s.attributes.downloadCount} DLs)",
+                                            groupIndex = null,
+                                            trackIndex = null,
+                                            isEmbedded = false
+                                        )
+                                    }
+                                    searchResults = mapped
+                                    isSearching = false
+                                }
+                            }
+                        },
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp)),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0366D6))
+                    ) {
+                        SearchButtonIcon()
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // Combined list (embedded + search results) - scrollable, takes up available space
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     val combined = (embeddedSubtitles + searchResults).distinctBy { it.displayLabel }
                     if (combined.isEmpty() && !isSearching) {
@@ -159,71 +215,6 @@ fun SubtitleMenuPopup(
                             )
                         }
                     }
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                // Search row at bottom
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = { searchQuery = it },
-                        label = { Text("Search") },
-                        singleLine = true,
-                        modifier = Modifier
-                            .weight(1f)
-                            .focusRequester(searchFieldFocusRequester),
-                        textStyle = LocalTextStyle.current.copy(
-                            fontSize = 14.sp
-                        )
-                    )
-
-                    Button(
-                        onClick = {
-                            if (searchQuery.isNotBlank()) {
-                                isSearching = true
-                                viewModel.searchSubtitles(searchQuery, "en", null, null) { results ->
-                                    @Suppress("ConvertMapNotNullToMapNotNull")
-                                    val mapped = results.mapNotNull { s ->
-                                        val fileId = s.attributes.files.firstOrNull()?.fileId
-                                        SubtitleEntry(
-                                            fileId = fileId,
-                                            language = s.attributes.language,
-                                            downloadCount = s.attributes.downloadCount,
-                                            source = "opensubtitles",
-                                            localFilePath = null,
-                                            displayLabel = "${s.attributes.language} (${s.attributes.downloadCount} DLs)",
-                                            groupIndex = null,
-                                            trackIndex = null,
-                                            isEmbedded = false
-                                        )
-                                    }
-                                    searchResults = mapped
-                                    isSearching = false
-                                }
-                            }
-                        },
-                        modifier = Modifier.clip(RoundedCornerShape(6.dp)),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0366D6))
-                    ) {
-                        SearchButtonIcon()
-                    }
-                }
-
-
-                // Close button
-                Spacer(Modifier.height(12.dp))
-                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-                    SubtitleCloseButton(
-                        onClick = {
-                            isOpen = false
-                            onDismiss()
-                        }
-                    )
                 }
             }
         }
@@ -286,35 +277,11 @@ private fun SubtitleItem(
 
 @Composable
 private fun SearchButtonIcon() {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isFocused by interactionSource.collectIsFocusedAsState()
-
     Icon(
         Icons.Default.Search,
         contentDescription = "Search",
         tint = Color.White,
-        modifier = Modifier.focusable(interactionSource = interactionSource)
+        modifier = Modifier.size(24.dp)
     )
 }
-
-@Composable
-private fun SubtitleCloseButton(
-    onClick: () -> Unit
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isFocused by interactionSource.collectIsFocusedAsState()
-
-    Button(
-        onClick = onClick,
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .focusable(interactionSource = interactionSource),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (isFocused) Color(0xFF0366D6) else Color(0xFF404040)
-        )
-    ) {
-        Text("Close", color = Color.White)
-    }
-}
-
 

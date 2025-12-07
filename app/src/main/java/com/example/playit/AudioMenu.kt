@@ -105,22 +105,10 @@ fun AudioMenuPopup(
                         fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
                     )
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clickable { viewModel.toggleAudioBoost() }
-                    ) {
-                        Text(
-                            "Boost",
-                            color = Color.White,
-                            fontSize = 12.sp
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Switch(
-                            checked = isBoostEnabled,
-                            onCheckedChange = { viewModel.toggleAudioBoost() }
-                        )
-                    }
+                    BoostToggle(
+                        isBoostEnabled = isBoostEnabled,
+                        onToggle = { viewModel.toggleAudioBoost() }
+                    )
                 }
 
                 Spacer(Modifier.height(16.dp))
@@ -150,17 +138,6 @@ fun AudioMenuPopup(
                             )
                         }
                     }
-                }
-
-                // Close button
-                Spacer(Modifier.height(12.dp))
-                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-                    CloseButton(
-                        onClick = {
-                            isOpen = false
-                            onDismiss()
-                        }
-                    )
                 }
             }
         }
@@ -230,61 +207,31 @@ private fun AudioTrackItem(
 }
 
 @Composable
-private fun CloseButton(
-    onClick: () -> Unit
+private fun BoostToggle(
+    isBoostEnabled: Boolean,
+    onToggle: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
 
-    Button(
-        onClick = onClick,
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
-            .focusable(interactionSource = interactionSource),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (isFocused) Color(0xFF0366D6) else Color(0xFF404040)
-        )
-    ) {
-        Text("Close", color = Color.White)
-    }
-}
-
-@Composable
-private fun AudioBoostToggle(
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isFocused by interactionSource.collectIsFocusedAsState()
-
-    Box(
-        modifier = Modifier
+            .background(if (isFocused) Color.White.copy(alpha = 0.1f) else Color.Transparent)
+            .padding(8.dp)
+            .clickable(interactionSource = interactionSource, indication = null) { onToggle() }
             .focusable(interactionSource = interactionSource)
-            .onKeyEvent { event ->
-                if (event.nativeKeyEvent.action != AndroidKeyEvent.ACTION_DOWN) {
-                    return@onKeyEvent false
-                }
-                when (event.nativeKeyEvent.keyCode) {
-                    AndroidKeyEvent.KEYCODE_DPAD_CENTER, AndroidKeyEvent.KEYCODE_ENTER -> {
-                        onCheckedChange(!checked)
-                        true
-                    }
-                    else -> false
-                }
-            }
-            .clickable { onCheckedChange(!checked) },
-        contentAlignment = Alignment.Center
     ) {
+        Text(
+            "Boost",
+            color = Color.White,
+            fontSize = 12.sp
+        )
+        Spacer(Modifier.width(8.dp))
         Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            modifier = Modifier
-                .height(24.dp)
-                .clip(RoundedCornerShape(6.dp))
-                .background(
-                    if (isFocused) Color(0xFF0366D6).copy(alpha = 0.3f) else Color.Transparent
-                )
-                .padding(4.dp)
+            checked = isBoostEnabled,
+            onCheckedChange = { onToggle() }
         )
     }
 }

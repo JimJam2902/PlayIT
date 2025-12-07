@@ -24,6 +24,8 @@ fun SettingsScreen(
 ) {
     var username by remember { mutableStateOf(settingsRepository.getOpenSubtitlesUsername() ?: "") }
     var password by remember { mutableStateOf(settingsRepository.getOpenSubtitlesPassword() ?: "") }
+    var apiKey by remember { mutableStateOf(settingsRepository.getOpenSubtitlesApiKey() ?: "") }
+    var useOrgApi by remember { mutableStateOf(settingsRepository.getOpenSubtitlesProvider() != "COM") }
     var passwordVisible by remember { mutableStateOf(false) }
     var savedMessage by remember { mutableStateOf("") }
     val loginStatus by subtitleRepository.loginStatus.collectAsState()
@@ -53,6 +55,35 @@ fun SettingsScreen(
         Column(modifier = Modifier.padding(padding).padding(24.dp).fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
             Text("OpenSubtitles Credentials", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(12.dp))
+
+            // API Provider Selection
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("API Provider:", style = MaterialTheme.typography.bodyMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(if (useOrgApi) "OpenSubtitles.org" else "OpenSubtitles.com", modifier = Modifier.padding(end = 8.dp))
+                    Switch(
+                        checked = useOrgApi,
+                        onCheckedChange = { useOrgApi = it },
+                        modifier = Modifier
+                    )
+                }
+            }
+
+            Text(
+                if (useOrgApi) "Using community API (no authentication required)" else "Using official API (requires credentials)",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
             OutlinedTextField(
                 value = username,
                 onValueChange = { username = it },
@@ -77,6 +108,20 @@ fun SettingsScreen(
                     }
                 }
             )
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = apiKey,
+                onValueChange = { apiKey = it },
+                label = { Text("OpenSubtitles API Key (optional)") },
+                modifier = Modifier.fillMaxWidth(),
+                visualTransformation = PasswordVisualTransformation()
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Get your API key at: https://www.opensubtitles.com/api",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(modifier = Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                 TextButton(onClick = {
@@ -84,6 +129,8 @@ fun SettingsScreen(
                     settingsRepository.clearOpenSubtitlesCredentials()
                     username = ""
                     password = ""
+                    apiKey = ""
+                    useOrgApi = true  // Default to .org
                     savedMessage = "Cleared"
                 }) { Text("Clear") }
                 Spacer(modifier = Modifier.width(8.dp))
@@ -95,6 +142,11 @@ fun SettingsScreen(
                     }
                     Log.d("SettingsScreen", "Saving credentials for user: $username")
                     settingsRepository.saveOpenSubtitlesCredentials(username, password)
+                    if (apiKey.isNotEmpty()) {
+                        settingsRepository.saveOpenSubtitlesApiKey(apiKey)
+                    }
+                    // Save provider selection
+                    settingsRepository.saveOpenSubtitlesProvider(if (useOrgApi) "ORG" else "COM")
                     savedMessage = "Saved ✓"
                 }) { Text("Save") }
             }

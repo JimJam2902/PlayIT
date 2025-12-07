@@ -282,7 +282,6 @@ fun PlayerControlsContent(
                         buffered = bufferedFraction,
                         onSeek = {
                             onSeek(it)
-                            if (controlsVisible) onInteraction()
                         },
                         durationSeconds = durationSeconds,
                         focusRequester = seekFocusRequester,
@@ -435,33 +434,29 @@ private fun SeekBar(
                 .focusable(interactionSource = interactionSource)
                 .onKeyEvent { event ->
                     val native = event.nativeKeyEvent
-                    if (native.action != android.view.KeyEvent.ACTION_DOWN) return@onKeyEvent false
 
-                    val stepSeconds = 5
-                    val deltaFraction = if (durationSeconds > 0) {
-                        (stepSeconds.toFloat() / durationSeconds.toFloat()).coerceIn(0f, 1f)
-                    } else 0.02f
+                    if (native.action == android.view.KeyEvent.ACTION_DOWN) {
+                        val stepSeconds = 5
+                        val deltaFraction = if (durationSeconds > 0) {
+                            (stepSeconds.toFloat() / durationSeconds.toFloat()).coerceIn(0f, 1f)
+                        } else 0.02f
 
-                    when (native.keyCode) {
-                        android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
-                            val new = (internalPos - deltaFraction).coerceIn(0f, 1f)
-                            internalPos = new
-                            onSeek(new)
-                            onUserInteraction()
-                            true
+                        when (native.keyCode) {
+                            android.view.KeyEvent.KEYCODE_DPAD_LEFT -> {
+                                val new = (internalPos - deltaFraction).coerceIn(0f, 1f)
+                                internalPos = new
+                                onSeek(new)
+                                true
+                            }
+                            android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                                val new = (internalPos + deltaFraction).coerceIn(0f, 1f)
+                                internalPos = new
+                                onSeek(new)
+                                true
+                            }
+                            else -> false
                         }
-                        android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                            val new = (internalPos + deltaFraction).coerceIn(0f, 1f)
-                            internalPos = new
-                            onSeek(new)
-                            onUserInteraction()
-                            true
-                        }
-                        android.view.KeyEvent.KEYCODE_DPAD_CENTER, android.view.KeyEvent.KEYCODE_ENTER -> {
-                            false
-                        }
-                        else -> false
-                    }
+                    } else false
                 }
                 .pointerInput(Unit) {
                     detectTapGestures { offset ->
