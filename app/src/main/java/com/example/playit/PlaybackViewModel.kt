@@ -277,20 +277,27 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         playerStateJob = null
     }
 
-    fun playMedia(url: String?) {
+    fun playMedia(url: String?, externalResumePositionMs: Long = 0L) {
         if (url == null) return
         _isAudioBoostEnabled.value = false // Reset boost on new media
         _isLoading.value = true // Start loading
         initializePlayer() // Re-initialize if released
         _title.value = url.substringAfterLast('/') // Simple title extraction
         scope.launch {
-            // Try best-match resume position (handles URL variants, filename-only keys, hashes)
-            val resumePosition = try {
-                resumeRepository.getBestResumePosition(url)
-            } catch (_: Exception) {
-                resumeRepository.getResumePosition(url)
+            // Prefer external resume position (from Stremio), fallback to local repository
+            val resumePosition = if (externalResumePositionMs > 0L) {
+                Log.d("PlaybackViewModel", "playMedia: using external resume position $externalResumePositionMs from Stremio")
+                externalResumePositionMs
+            } else {
+                // Try best-match resume position (handles URL variants, filename-only keys, hashes)
+                val localResume = try {
+                    resumeRepository.getBestResumePosition(url)
+                } catch (_: Exception) {
+                    resumeRepository.getResumePosition(url)
+                }
+                Log.d("PlaybackViewModel", "playMedia: url=$url using local resume position=$localResume")
+                localResume
             }
-            Log.d("PlaybackViewModel", "playMedia: url=$url resumePosition=$resumePosition")
             playbackRepository.prepareAndPlay(url, resumePosition)
             // Reset subtitles state for new media
             _availableSubtitles.value = emptyList()

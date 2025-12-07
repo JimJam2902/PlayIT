@@ -1,6 +1,7 @@
 package com.example.playit
 
 import android.os.Bundle
+import android.content.Intent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
@@ -37,6 +38,9 @@ class PlayerActivityMinimal : ComponentActivity() {
 
     private var stremioCallbackUrl: String? = null
     private var reporterJob: Job? = null
+    private var resumePositionMs: Long = 0L
+    private var resumeDurationMs: Long = 0L
+    private var shouldReturnResult: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,13 +48,56 @@ class PlayerActivityMinimal : ComponentActivity() {
         val dataUri = intent?.data
         val mediaUrl = dataUri?.toString()
 
+        android.util.Log.d("PlayerActivityMinimal", "=== INTENT DATA ===")
+        android.util.Log.d("PlayerActivityMinimal", "Intent URI: $dataUri")
+        android.util.Log.d("PlayerActivityMinimal", "Intent Action: ${intent?.action}")
+
         stremioCallbackUrl = try {
             dataUri?.getQueryParameter("callback")
         } catch (_: Exception) { null }
 
+        // Check for return_result flag - Stremio uses this instead of callback URL
+        shouldReturnResult = intent?.getBooleanExtra("return_result", false) ?: false
+        android.util.Log.d("PlayerActivityMinimal", "return_result flag: $shouldReturnResult")
+
+        // Extract resume position and duration from intent extras (Stremio integration)
+        // Try multiple formats: Long, Int, String
+        val positionLong = intent?.getLongExtra("position", 0L) ?: 0L
+        val positionInt = intent?.getIntExtra("position", 0)
+        val positionStr = intent?.getStringExtra("position")
+        resumePositionMs = when {
+            positionInt != null && positionInt > 0 -> positionInt.toLong()
+            positionLong > 0L -> positionLong
+            !positionStr.isNullOrEmpty() && positionStr.toLongOrNull() ?: 0L > 0L -> positionStr.toLong()
+            else -> 0L
+        }
+
+        resumeDurationMs = intent?.getLongExtra("duration", 0L) ?: 0L
+
+        // Log all extras for debugging
+        intent?.extras?.let { extras ->
+            android.util.Log.d("PlayerActivityMinimal", "=== ALL EXTRAS ===")
+            for (key in extras.keySet()) {
+                val value = extras.get(key)
+                android.util.Log.d("PlayerActivityMinimal", "  $key: $value (${value?.javaClass?.simpleName})")
+            }
+        } ?: run {
+            android.util.Log.d("PlayerActivityMinimal", "NO EXTRAS in intent")
+        }
+
+        if (resumePositionMs > 0L) {
+            android.util.Log.d("PlayerActivityMinimal", "✓ Resume position: ${resumePositionMs}ms (duration: ${resumeDurationMs}ms)")
+        } else {
+            android.util.Log.d("PlayerActivityMinimal", "ℹ No resume position (first playthrough)")
+        }
+
         if (!stremioCallbackUrl.isNullOrEmpty()) {
-            android.util.Log.d("PlayerActivityMinimal", "Callback = $stremioCallbackUrl")
+            android.util.Log.d("PlayerActivityMinimal", "✓ Callback URL: $stremioCallbackUrl")
             startReporter()
+        } else if (shouldReturnResult) {
+            android.util.Log.d("PlayerActivityMinimal", "✓ Will return result via setResult() on exit")
+        } else {
+            android.util.Log.d("PlayerActivityMinimal", "✗ Neither callback URL nor return_result found")
         }
 
         setContent {
@@ -60,6 +107,7 @@ class PlayerActivityMinimal : ComponentActivity() {
                         viewModel = playbackViewModel,
                         mediaUrl = mediaUrl,
                         mediaUri = null,
+                        resumePositionMs = resumePositionMs,
                         onExit = { finish() }
                     )
                 }
@@ -70,12 +118,40 @@ class PlayerActivityMinimal : ComponentActivity() {
     override fun finish() {
         try { reporterJob?.cancel() } catch (_: Exception) {}
 
+        val posMs = playbackViewModel.player?.currentPosition ?: 0L
+        val durMs = playbackViewModel.player?.duration ?: 0L
+
+        // If Stremio asked for result via return_result flag, return it via setResult
+        if (shouldReturnResult) {
+            android.util.Log.d("PlayerActivityMinimal", "Returning result: position=${posMs}ms, duration=${durMs}ms")
+
+            // Follow MPV-Android pattern: create result intent with original data preserved
+            val resultIntent = Intent().apply {
+                // Preserve the original intent's data (the video URL)
+                data = intent?.data
+                // Add position and duration as INTEGERS (in milliseconds), matching MPV-Android
+                putExtra("position", posMs.toInt())
+                putExtra("duration", durMs.toInt())
+                // Also preserve other extras Stremio might expect
+                putExtra("startfrom", intent?.getIntExtra("startfrom", 0) ?: 0)
+                putExtra("return_result", true)
+            }
+
+            android.util.Log.d("PlayerActivityMinimal", "Result intent data: ${resultIntent.data}")
+            android.util.Log.d("PlayerActivityMinimal", "Result extras: position=${posMs.toInt()}, duration=${durMs.toInt()}, startfrom=${intent?.getIntExtra("startfrom", 0)}")
+
+            setResult(RESULT_OK, resultIntent)
+
+            // Give Stremio a moment to receive and process the result
+            try {
+                Thread.sleep(100)
+            } catch (_: Exception) {}
+        }
+
+        // If callback URL exists, also send final "stopped" event via JSON-RPC
         val url = stremioCallbackUrl
         if (!url.isNullOrEmpty()) {
-            val p = playbackViewModel.player
-            val posMs = p?.currentPosition ?: 0L
-            val durMs = p?.duration ?: 0L
-
+            android.util.Log.d("PlayerActivityMinimal", "Sending stopped event via callback")
             // final event in background thread
             Thread {
                 try {
@@ -133,6 +209,8 @@ class PlayerActivityMinimal : ComponentActivity() {
         var conn: HttpURLConnection? = null
 
         try {
+            android.util.Log.d("PlayerActivityMinimal", "sendJsonRpc: sending $event to $urlString")
+
             val connUrl = URL(urlString)
             conn = connUrl.openConnection() as HttpURLConnection
             conn.connectTimeout = 4000
@@ -150,6 +228,8 @@ class PlayerActivityMinimal : ComponentActivity() {
                 event, posSec, durSec, paused
             )
 
+            android.util.Log.d("PlayerActivityMinimal", "JSON-RPC payload: $payload")
+
             val out = BufferedOutputStream(conn.outputStream)
             val bytes = payload.toByteArray(StandardCharsets.UTF_8)
             out.write(bytes)
@@ -157,16 +237,24 @@ class PlayerActivityMinimal : ComponentActivity() {
             out.close()
 
             val code = conn.responseCode
-            android.util.Log.d("PlayerActivityMinimal", "POST → $urlString  code=$code")
+            android.util.Log.d("PlayerActivityMinimal", "POST response code: $code")
+
+            if (code == 200 || code == 201) {
+                android.util.Log.d("PlayerActivityMinimal", "✓ JSON-RPC $event sent successfully")
+            } else {
+                android.util.Log.w("PlayerActivityMinimal", "⚠ JSON-RPC returned code $code")
+            }
 
             try {
                 val br = BufferedReader(InputStreamReader(conn.inputStream))
-                br.forEachLine { }  // Consume all lines from response
+                br.forEachLine { line ->
+                    android.util.Log.d("PlayerActivityMinimal", "Response: $line")
+                }
                 br.close()
             } catch (_: Exception) {}
 
         } catch (e: Exception) {
-            android.util.Log.d("PlayerActivityMinimal", "sendJsonRpc error: ${e.message}")
+            android.util.Log.e("PlayerActivityMinimal", "✗ sendJsonRpc error: ${e.message}", e)
         } finally {
             try { conn?.disconnect() } catch (_: Exception) {}
         }

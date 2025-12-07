@@ -40,8 +40,8 @@ private fun TvButton(
     text: String,
     onClick: () -> Unit,
     focusRequester: FocusRequester,
-    nextFocusRequester: FocusRequester? = null,
-    previousFocusRequester: FocusRequester? = null,
+    onDpadDown: () -> Boolean = { false },
+    onDpadUp: () -> Boolean = { false },
     modifier: Modifier = Modifier
 ) {
     val interactionSource = remember { MutableInteractionSource() }
@@ -54,15 +54,16 @@ private fun TvButton(
             .focusRequester(focusRequester)
             .focusable(interactionSource = interactionSource)
             .onKeyEvent { event: ComposeKeyEvent ->
+                if (event.nativeKeyEvent.action != AndroidKeyEvent.ACTION_DOWN) {
+                    return@onKeyEvent false
+                }
                 val keyCode = event.nativeKeyEvent.keyCode
                 when (keyCode) {
                     AndroidKeyEvent.KEYCODE_DPAD_DOWN -> {
-                        nextFocusRequester?.requestFocus()
-                        true
+                        onDpadDown()
                     }
                     AndroidKeyEvent.KEYCODE_DPAD_UP -> {
-                        previousFocusRequester?.requestFocus()
-                        true
+                        onDpadUp()
                     }
                     AndroidKeyEvent.KEYCODE_DPAD_CENTER,
                     AndroidKeyEvent.KEYCODE_ENTER -> {
@@ -148,8 +149,14 @@ fun HomeScreen(
                 urlInput = ""
             },
             focusRequester = urlButtonFocusRequester,
-            nextFocusRequester = fileButtonFocusRequester,
-            previousFocusRequester = settingsButtonFocusRequester
+            onDpadDown = {
+                fileButtonFocusRequester.requestFocus()
+                true
+            },
+            onDpadUp = {
+                settingsButtonFocusRequester.requestFocus()
+                true
+            }
         )
 
         // ----------------------------------------------------------------------------------
@@ -165,8 +172,14 @@ fun HomeScreen(
                 }
             },
             focusRequester = fileButtonFocusRequester,
-            nextFocusRequester = settingsButtonFocusRequester,
-            previousFocusRequester = urlButtonFocusRequester
+            onDpadDown = {
+                settingsButtonFocusRequester.requestFocus()
+                true
+            },
+            onDpadUp = {
+                urlButtonFocusRequester.requestFocus()
+                true
+            }
         )
 
         // ----------------------------------------------------------------------------------
@@ -176,8 +189,14 @@ fun HomeScreen(
             text = "Settings",
             onClick = onSettings,
             focusRequester = settingsButtonFocusRequester,
-            nextFocusRequester = urlButtonFocusRequester,
-            previousFocusRequester = fileButtonFocusRequester
+            onDpadDown = {
+                urlButtonFocusRequester.requestFocus()
+                true
+            },
+            onDpadUp = {
+                fileButtonFocusRequester.requestFocus()
+                true
+            }
         )
     }
 

@@ -2,6 +2,7 @@ package com.example.playit
 
 import android.net.Uri
 import android.os.Bundle
+import android.content.Intent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
@@ -28,6 +29,25 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalTvMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Check if this is a Stremio callback with video intent
+        val dataUri = intent?.data
+        if (dataUri != null) {
+            // This is likely a Stremio callback - redirect to PlayerActivityMinimal
+            val callbackUrl = dataUri.getQueryParameter("callback")
+            if (!callbackUrl.isNullOrEmpty()) {
+                // Redirect to PlayerActivityMinimal which handles Stremio callbacks
+                val intent = Intent(this, PlayerActivityMinimal::class.java).apply {
+                    data = dataUri
+                    // Preserve ALL extras from the original intent (position, duration, etc.)
+                    putExtras(this@MainActivity.intent.extras ?: Bundle())
+                }
+                startActivity(intent)
+                finish()
+                return
+            }
+        }
+
         setContent {
             PlayITTheme {
                 Surface(
@@ -83,14 +103,12 @@ fun AppNavHost(viewModel: PlaybackViewModel) {
             )
         ) { backStackEntry ->
             val url = backStackEntry.arguments?.getString("url")
-            // FIX #1: Convert the URI string back to a Uri? object
             val uriString = backStackEntry.arguments?.getString("uri")
-            val uri = uriString?.let { Uri.parse(it) }
 
             PlayerScreen(
                 viewModel = viewModel,
                 mediaUrl = url,
-                mediaUri = uri,
+                mediaUri = uriString,
                 onExit = { navController.popBackStack() }
             )
         }

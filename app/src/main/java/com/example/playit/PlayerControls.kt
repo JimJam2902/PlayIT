@@ -57,8 +57,6 @@ fun PlayerControls(
     onUserInteraction: () -> Unit = {},
     // Notifies parent whether any control is currently focused
     onControlsFocusChanged: (Boolean) -> Unit = {},
-    // Request to show diagnostics UI
-    onShowDiagnostics: () -> Unit = {},
     // Notify parent when any dialog opens/closes so parent can avoid consuming BACK
     onDialogsOpenChanged: (Boolean) -> Unit = {}
 ) {
@@ -67,14 +65,12 @@ fun PlayerControls(
     val positionFraction by viewModel.positionFraction.collectAsState()
     val bufferedFraction by viewModel.bufferedFraction.collectAsState()
     val durationSeconds = viewModel.totalSeconds
-    val diagnosticsText by viewModel.diagnosticsText.collectAsState()
     var showAudioDialog by remember { mutableStateOf(false) }
-    var showDiagnostics by remember { mutableStateOf(false) }
     var showSubtitleFull by remember { mutableStateOf(false) }
 
     // Compute whether any dialog from the parent is currently showing so the child can avoid
     // intercepting keys when a dialog needs to receive D-pad input.
-    val dialogsOpen = showAudioDialog || showDiagnostics || showSubtitleFull
+    val dialogsOpen = showAudioDialog || showSubtitleFull
 
     // Notify parent when dialogsOpen changes
     LaunchedEffect(dialogsOpen) { onDialogsOpenChanged(dialogsOpen) }
@@ -98,14 +94,12 @@ fun PlayerControls(
         playPauseFocusRequester = playPauseFocusRequester,
         onInteraction = onUserInteraction,
         onControlsFocusChanged = onControlsFocusChanged,
-        onShowDiagnostics = { showDiagnostics = true; onShowDiagnostics(); onUserInteraction() },
-        controlsVisible = controlsVisible, // Pass down the visibility state
-        dialogsOpen = dialogsOpen // let child know parent dialogs state
+        controlsVisible = controlsVisible // Pass down the visibility state
     )
 
-    // ------------------ FULL-SCREEN AUDIO DIALOG ------------------
+    // ------------------ AUDIO MENU POPUP ------------------
     if (showAudioDialog) {
-        AudioSettingsFullScreen(
+        AudioMenuPopup(
             viewModel = viewModel,
             onDismiss = {
                 showAudioDialog = false
@@ -114,22 +108,14 @@ fun PlayerControls(
         )
     }
 
-    // ------------------ FULL-SCREEN SUBTITLE DIALOG ------------------
+    // ------------------ SUBTITLE MENU POPUP ------------------
     if (showSubtitleFull) {
-        SubtitleSettingsFullScreen(
+        SubtitleMenuPopup(
             viewModel = viewModel,
             onDismiss = {
                 showSubtitleFull = false
                 onUserInteraction()
             }
-        )
-    }
-
-    // Diagnostics dialog stays as small dialog for quick text inspection
-    if (showDiagnostics) {
-        DiagnosticsDialog(
-            diagnosticsText = diagnosticsText,
-            onDismiss = { showDiagnostics = false; onUserInteraction() }
         )
     }
 }
@@ -151,9 +137,7 @@ fun PlayerControlsContent(
     // Whether the controls are currently visible (used to avoid re-show during exit animation)
     controlsVisible: Boolean = true,
     onInteraction: () -> Unit = {},
-    onControlsFocusChanged: (Boolean) -> Unit = {},
-    onShowDiagnostics: () -> Unit = {},
-    dialogsOpen: Boolean = false // parent dialog visibility
+    onControlsFocusChanged: (Boolean) -> Unit = {}
 ) {
     // Interaction sources and focus requesters for controls we want to track
     val playPauseInteraction = remember { MutableInteractionSource() }
@@ -179,54 +163,23 @@ fun PlayerControlsContent(
 
     Box(
         modifier = modifier
-            .fillMaxSize()
-            // Gradient Overlay for visibility
-            .background(
-                brush = Brush.verticalGradient(
-                    colors = listOf(
-                        Color.Black.copy(alpha = 0.7f),
-                        Color.Transparent,
-                        Color.Black.copy(alpha = 0.9f)
-                    )
-                )
-            )
-            // Intercept key events at the root so we can keep controls visible on any key press and handle center
-            .onKeyEvent { event ->
-                val native = event.nativeKeyEvent
-                if (native.action != android.view.KeyEvent.ACTION_DOWN) return@onKeyEvent false
-
-                // Don't treat key events as interaction if controls are in the process of hiding. This
-                // prevents AnimatedVisibility exit/focus from immediately re-showing the UI.
-                if (!controlsVisible) return@onKeyEvent false
-
-                // Any key-down inside the controls should count as user interaction (reset autohide timer)
-                onInteraction()
-
-                // If a popup/dialog is currently open in the parent, let it receive keys (don't intercept center/enter here)
-                if (dialogsOpen) {
-                    return@onKeyEvent false
-                }
-
-                when (native.keyCode) {
-                    android.view.KeyEvent.KEYCODE_DPAD_CENTER,
-                    android.view.KeyEvent.KEYCODE_ENTER -> {
-                        // If any control is focused, let that control handle center/enter (play/pause/seek/chips)
-                        if (playPauseFocused || seekFocused || chip1Focused || chip2Focused) return@onKeyEvent false
-
-                        // No control is focused: treat center as Play/Pause toggle
-                        onPlayPause()
-                        true
-                    }
-                    else -> false
-                }
-            }
+            .fillMaxWidth()
+            .fillMaxHeight()
     ) {
-        // --- 1. Top Bar ---
+        // --- 1. Top Bar with Gradient ---
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
-                .padding(top = 20.dp, start = 40.dp, end = 40.dp),
+                .background(
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.8f),
+                            Color.Transparent
+                        )
+                    )
+                )
+                .padding(top = 20.dp, start = 40.dp, end = 40.dp, bottom = 20.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -264,7 +217,15 @@ fun PlayerControlsContent(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(bottom = 20.dp, start = 40.dp, end = 40.dp)
+                .background(
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color.Black.copy(alpha = 0.8f)
+                        )
+                    )
+                )
+                .padding(bottom = 20.dp, start = 40.dp, end = 40.dp, top = 20.dp)
         ) {
             // Row: [Play/Pause] [Time] [SeekBar] [TotalTime]
             Row(
@@ -356,7 +317,7 @@ fun PlayerControlsContent(
                     onClick = { onAudioSettings(); if (controlsVisible) onInteraction() },
                     interactionSource = chip1Interaction,
                     onFocusChange = { focused -> if (controlsVisible) onControlsFocusChanged(focused) },
-                    focusedBackground = Color.Gray.copy(alpha = 0.6f),
+                    focusedBackground = Color.White.copy(alpha = 0.2f),
                     unfocusedBackground = Color.Transparent
                 )
                 Spacer(modifier = Modifier.width(16.dp))
@@ -365,7 +326,7 @@ fun PlayerControlsContent(
                     onClick = { onDownloadSubtitle(); if (controlsVisible) onInteraction() },
                     interactionSource = chip2Interaction,
                     onFocusChange = { focused -> if (controlsVisible) onControlsFocusChanged(focused) },
-                    focusedBackground = Color.Gray.copy(alpha = 0.6f),
+                    focusedBackground = Color.White.copy(alpha = 0.2f),
                     unfocusedBackground = Color.Transparent
                 )
             }
@@ -592,8 +553,7 @@ fun PlayerControlsPreview() {
                 onExit = { },
                 playPauseFocusRequester = focusRequester,
                 onInteraction = {},
-                onControlsFocusChanged = {},
-                onShowDiagnostics = {}
+                onControlsFocusChanged = {}
             )
         }
     }
