@@ -216,22 +216,39 @@ private fun BoostToggle(
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(if (isFocused) Color.White.copy(alpha = 0.1f) else Color.Transparent)
-            .padding(8.dp)
-            .clickable(interactionSource = interactionSource, indication = null) { onToggle() }
-            .focusable(interactionSource = interactionSource)
+        modifier = Modifier.padding(8.dp)
     ) {
         Text(
             "Boost",
             color = Color.White,
-            fontSize = 12.sp
+            fontSize = 12.sp,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
         )
         Spacer(Modifier.width(8.dp))
         Switch(
             checked = isBoostEnabled,
-            onCheckedChange = { onToggle() }
+            onCheckedChange = { onToggle() },
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(
+                    when {
+                        isFocused -> Color.White.copy(alpha = 0.2f)
+                        else -> Color.Transparent
+                    }
+                )
+                .focusable(interactionSource = interactionSource)
+                .onKeyEvent { event ->
+                    if (event.nativeKeyEvent.action != AndroidKeyEvent.ACTION_DOWN) {
+                        return@onKeyEvent false
+                    }
+                    when (event.nativeKeyEvent.keyCode) {
+                        AndroidKeyEvent.KEYCODE_DPAD_CENTER, AndroidKeyEvent.KEYCODE_ENTER -> {
+                            onToggle()
+                            true
+                        }
+                        else -> false
+                    }
+                }
         )
     }
 }
