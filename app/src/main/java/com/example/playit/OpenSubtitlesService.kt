@@ -37,14 +37,17 @@ data class Subtitle(
 )
 
 data class SubtitleAttributes(
-    @SerializedName("subtitle_id") val subtitleId: String,
+    @SerializedName("subtitle_id") val subtitleId: String? = null,
+    val name: String? = null,
     val language: String,
     @SerializedName("download_count") val downloadCount: Int,
+    @SerializedName("upload_count") val uploadCount: Int = 0,
     val files: List<SubtitleFile>
 )
 
 data class SubtitleFile(
-    @SerializedName("file_id") val fileId: Long
+    @SerializedName("file_id") val fileId: Long? = null,
+    @SerializedName("file_name") val fileName: String? = null
 )
 
 data class DownloadRequest(

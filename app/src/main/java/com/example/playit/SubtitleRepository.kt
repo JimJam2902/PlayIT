@@ -240,17 +240,61 @@ class SubtitleRepository(private val context: Context) {
         tmdbId: String? = null,
         year: Int? = null
     ): List<Subtitle> = withContext(Dispatchers.IO) {
+        val provider = getApiProvider()
+        Log.d("SubtitleRepository", "searchSubtitles: provider=$provider, query='$query', language=$language")
+
         ensureLoggedIn()
 
-        val apiKey = getApiKey()
-        val searchParams = mutableMapOf("query" to query, "languages" to language)
-        tmdbId?.let { searchParams["tmdb_id"] = it }
-        year?.let { searchParams["year"] = it.toString() }
-
         try {
-            service.search(apiKey, authToken ?: "", searchParams).data
+            return@withContext when (provider) {
+                ApiProvider.ORG -> {
+                    // Use OpenSubtitles.org API (no authentication needed)
+                    Log.d("SubtitleRepository", "Using OpenSubtitles.org API for search")
+                    val orgService = OpenSubtitlesOrgClient.instance
+                    val searchParams = mutableMapOf("query" to query, "languages" to language)
+                    tmdbId?.let { searchParams["tmdb_id"] = it }
+                    year?.let { searchParams["year"] = it.toString() }
+
+                    Log.d("SubtitleRepository", "Searching with params: $searchParams")
+                    val response = orgService.search(searchParams)
+                    Log.d("SubtitleRepository", "OpenSubtitles.org search response: ${response.data?.size ?: 0} results")
+
+                    response.data?.mapNotNull { orgSubtitle ->
+                        // Convert OpenSubtitlesOrgSubtitle to Subtitle format
+                        Subtitle(
+                            id = orgSubtitle.id,
+                            attributes = SubtitleAttributes(
+                                name = orgSubtitle.attributes.name,
+                                language = orgSubtitle.attributes.language,
+                                downloadCount = orgSubtitle.attributes.downloadCount,
+                                uploadCount = orgSubtitle.attributes.uploadCount,
+                                files = orgSubtitle.attributes.files.mapNotNull { file ->
+                                    // Extract file ID from file_id field
+                                    file.file_id?.let { fileId ->
+                                        SubtitleFile(fileId = fileId, fileName = file.fileName)
+                                    }
+                                }
+                            )
+                        )
+                    } ?: emptyList()
+                }
+                ApiProvider.COM -> {
+                    // Use OpenSubtitles.com API (requires authentication)
+                    Log.d("SubtitleRepository", "Using OpenSubtitles.com API for search")
+                    val apiKey = getApiKey()
+                    val searchParams = mutableMapOf("query" to query, "languages" to language)
+                    tmdbId?.let { searchParams["tmdb_id"] = it }
+                    year?.let { searchParams["year"] = it.toString() }
+
+                    Log.d("SubtitleRepository", "Searching with params: $searchParams")
+                    val response = service.search(apiKey, authToken ?: "", searchParams)
+                    Log.d("SubtitleRepository", "OpenSubtitles.com search response: ${response.data?.size ?: 0} results")
+                    response.data ?: emptyList()
+                }
+            }
         } catch (e: Exception) {
-            Log.e("SubtitleRepository", "Subtitle search failed", e)
+            Log.e("SubtitleRepository", "Subtitle search failed: ${e.message}", e)
+            e.printStackTrace()
             emptyList()
         }
     }

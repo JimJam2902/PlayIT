@@ -208,7 +208,11 @@ class PlaybackRepository(private val context: Context) {
 
     @OptIn(UnstableApi::class)
     fun setAudioBoost(enabled: Boolean) {
-        volumeProcessor?.setVolume(if (enabled) 2.0f else 1.0f)
+        // Enable the new psychoacoustic boost algorithm
+        volumeProcessor?.setBoostEnabled(enabled)
+        // Set base volume to 1.0 (boost algorithm handles amplification)
+        volumeProcessor?.setVolume(1.0f)
+        Log.d("PlaybackRepository", "Audio boost: enabled=$enabled")
     }
 
     fun prepareAndPlay(url: String, startPosition: Long) {

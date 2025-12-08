@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -22,6 +23,23 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+
+// Helper function to format time in milliseconds to HH:MM:SS or MM:SS
+fun formatTimeMs(timeMs: Long): String {
+    val totalSeconds = timeMs / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+
+    return if (hours > 0) {
+        String.format("%02d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format("%02d:%02d", minutes, seconds)
+    }
+}
 
 @UnstableApi
 @Composable
@@ -37,6 +55,13 @@ fun PlayerScreen(
 
     var areControlsVisible by remember { mutableStateOf(false) }
     val playPauseFocusRequester = remember { FocusRequester() }
+
+    // Seek feedback state (for showing seek position when controls are hidden)
+    var showSeekFeedback by remember { mutableStateOf(false) }
+    var seekFeedbackPositionMs by remember { mutableStateOf(0L) }
+    var seekFeedbackDurationMs by remember { mutableStateOf(0L) }
+    var seekFeedbackTimeoutJob by remember { mutableStateOf<Job?>(null) }
+    var seekTrigger by remember { mutableStateOf(0) } // Increment on each seek to trigger LaunchedEffect
 
     // Track last user interaction to reset autohide timer
     var lastInteractionMs by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -111,6 +136,22 @@ fun PlayerScreen(
         } else {
             // When controls hide, ensure the root can capture the next remote key to reveal controls
             rootFocusRequester.requestFocus()
+        }
+    }
+
+    // Handle seek feedback timeout (hide after 1.5 seconds of no seeking)
+    LaunchedEffect(seekTrigger) {
+        if (showSeekFeedback && seekTrigger > 0) {
+            // Cancel existing job
+            seekFeedbackTimeoutJob?.cancel()
+
+            // Create new timeout job within LaunchedEffect coroutine scope
+            seekFeedbackTimeoutJob = launch {
+                delay(1500) // Show for 1.5 seconds
+                if (isActive) {
+                    showSeekFeedback = false
+                }
+            }
         }
     }
 
@@ -190,6 +231,13 @@ fun PlayerScreen(
                             viewModel.player?.let { p ->
                                 val newPos = (p.currentPosition + SEEK_MS).coerceAtMost(p.duration)
                                 p.seekTo(newPos)
+
+                                // Show seek feedback
+                                seekFeedbackPositionMs = newPos
+                                seekFeedbackDurationMs = p.duration
+                                showSeekFeedback = true
+                                seekTrigger++ // Trigger timeout reset
+
                                 Log.d("PlayerScreen", "onPreviewKeyEvent: hidden -> DPAD_RIGHT seek to $newPos")
                             }
                             // DON'T show controls - let user seek continuously without interruption
@@ -200,6 +248,13 @@ fun PlayerScreen(
                             viewModel.player?.let { p ->
                                 val newPos = (p.currentPosition - SEEK_MS).coerceAtLeast(0L)
                                 p.seekTo(newPos)
+
+                                // Show seek feedback
+                                seekFeedbackPositionMs = newPos
+                                seekFeedbackDurationMs = p.duration
+                                showSeekFeedback = true
+                                seekTrigger++ // Trigger timeout reset
+
                                 Log.d("PlayerScreen", "onPreviewKeyEvent: hidden -> DPAD_LEFT seek to $newPos")
                             }
                             // DON'T show controls - let user seek continuously without interruption
@@ -286,6 +341,41 @@ fun PlayerScreen(
                 onControlsFocusChanged = { controlsHaveFocus = it },
                 onDialogsOpenChanged = { open -> dialogsOpenState = open }
             )
+        }
+
+        // Seek Feedback Overlay (shows when seeking with hidden controls)
+        AnimatedVisibility(
+            visible = showSeekFeedback && !areControlsVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.Center)
+        ) {
+            Box(
+                modifier = Modifier
+                    .background(
+                        color = Color.Black.copy(alpha = 0.75f),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+                    )
+                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.wrapContentSize()
+                ) {
+                    Text(
+                        text = formatTimeMs(seekFeedbackPositionMs),
+                        color = Color.White,
+                        fontSize = 32.sp,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                    Text(
+                        text = "/ ${formatTimeMs(seekFeedbackDurationMs)}",
+                        color = Color.Gray,
+                        fontSize = 14.sp
+                    )
+                }
+            }
         }
     }
 }

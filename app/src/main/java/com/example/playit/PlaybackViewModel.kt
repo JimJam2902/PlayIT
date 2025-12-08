@@ -94,10 +94,34 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         private set
     private val trackSelector: DefaultTrackSelector = DefaultTrackSelector(application)
 
+    // Network error retry properties
+    private var currentMediaUrl: String? = null
+    private var currentResumePosition: Long = 0L
+    private var retryCount: Int = 0
+    private var retryJob: Job? = null
+
+    // Track last known good duration for completion detection on activity stop
+    private var lastKnownDurationMs: Long = 0L
+
     private val scope = CoroutineScope(Dispatchers.Main)
     private var playerStateJob: Job? = null
+    private var resumeSaveJob: Job? = null  // Periodic save of resume position while playing
     // Track which mediaId we've already launched subtitle search for, avoid duplicate searches
     private var subtitleSearchLaunchedForMediaId: String? = null
+
+    // Callback for PlayerActivity to handle completion triggered by error scenarios
+    var onPlaybackCompletionCallback: (() -> Unit)? = null
+
+    // Track last Matroska EOF error position to detect if we're stuck in a retry loop
+    private var lastMatroskaEOFPosition: Long = 0L
+    private var matroskaEOFRetryCount: Int = 0
+
+    companion object {
+        private const val MAX_RETRIES = 3
+        private const val RETRY_DELAY_MS = 2000L
+        private const val RESUME_SAVE_INTERVAL_MS = 5000L  // Save resume position every 5 seconds while playing
+        private const val MATROSKA_RETRY_LOOP_THRESHOLD_MS = 10000L  // If 2nd EOF within 10 seconds of first, it's a corrupt stream
+    }
 
     init {
         initializePlayer()
@@ -133,7 +157,11 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                     Player.STATE_READY -> {
                         _isLoading.value = false
                         totalSeconds = (p.duration / 1000).toInt().coerceAtLeast(0)
-                        Log.d("PlaybackViewModel", "Player is ready, loading complete")
+                        // Store the last known good duration for use in onActivityStop
+                        if (p.duration > 0) {
+                            lastKnownDurationMs = p.duration
+                            Log.d("PlaybackViewModel", "Player is ready, duration=$lastKnownDurationMs ms")
+                        }
                         // Trigger background subtitle search / auto-apply when ready
                         maybePerformSubtitleAutoSearch()
                     }
@@ -143,6 +171,185 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                     Player.STATE_ENDED -> {
                         _isLoading.value = false
                     }
+                }
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                Log.e("PlaybackViewModel", "Player error occurred: ${error.message}", error)
+
+                val p = player
+                val currentPos = p?.currentPosition ?: 0L
+                val duration = p?.duration ?: 0L
+
+                // Get full error stack trace as string for analysis
+                val errorStackTrace = Log.getStackTraceString(error)
+                Log.d("PlaybackViewModel", "Error detection - checking: Matroska EOF first, then network errors")
+
+                // FIRST PRIORITY: Check if this is a Matroska/Subtitle EOF error
+                // These are common near end of file and should NOT be retried
+                val isMatroskaEOF = errorStackTrace.contains("EOFException") &&
+                    (errorStackTrace.contains("MatroskaExtractor") ||
+                     errorStackTrace.contains("VarintReader") ||
+                     errorStackTrace.contains("DefaultEbmlReader") ||
+                     errorStackTrace.contains("Matroska"))
+
+                if (isMatroskaEOF) {
+                    Log.d("PlaybackViewModel", "✓ Detected Matroska/Subtitle EOF error (expected at end of file)")
+
+                    if (duration > 0) {
+                        val timeToEnd = duration - currentPos
+                        val percentComplete = (currentPos.toFloat() / duration) * 100
+                        Log.d("PlaybackViewModel", "→ Playback progress: $percentComplete% ($currentPos/$duration ms, ${timeToEnd}ms to end)")
+
+                        // Check if we're in a retry loop (getting EOF errors in quick succession)
+                        val isRetryLoop = if (lastMatroskaEOFPosition > 0L) {
+                            val timeSinceLastEOF = currentPos - lastMatroskaEOFPosition
+                            timeSinceLastEOF < MATROSKA_RETRY_LOOP_THRESHOLD_MS && timeSinceLastEOF >= 0L
+                        } else {
+                            false
+                        }
+
+                        if (isRetryLoop) {
+                            matroskaEOFRetryCount++
+                            Log.d("PlaybackViewModel", "⚠ Retry loop detected! EOF errors occurring in rapid succession (${matroskaEOFRetryCount}x)")
+                            Log.d("PlaybackViewModel", "  Last EOF at: $lastMatroskaEOFPosition ms, Current EOF at: $currentPos ms, Delta: ${currentPos - lastMatroskaEOFPosition}ms")
+                        } else {
+                            matroskaEOFRetryCount = 0  // Reset counter if we've advanced significantly
+                        }
+                        lastMatroskaEOFPosition = currentPos
+
+                        // Use TIME-BASED threshold, not percentage-based
+                        // Only treat as completion if within last 5 seconds of video AND no retry loop
+                        if (timeToEnd <= 5000L && !isRetryLoop) {
+                            Log.d("PlaybackViewModel", "→ Matroska EOF with only ${timeToEnd}ms remaining (no retry loop) - treating as normal episode completion (NOT retrying)")
+                            _isLoading.value = false
+                            matroskaEOFRetryCount = 0  // Reset for next media
+                            // Trigger completion callback for PlayerActivity
+                            onPlaybackCompletionCallback?.invoke()
+                            return
+                        } else if (isRetryLoop && matroskaEOFRetryCount >= 2) {
+                            // We've hit EOF twice in quick succession - the stream tail is corrupted
+                            // Instead of retrying from the same position, just skip to the very end
+                            // and let playback finish naturally
+                            Log.d("PlaybackViewModel", "✗ Stream tail corrupted (${matroskaEOFRetryCount} rapid EOF errors), skipping to end to let episode finish")
+
+                            if (retryCount < MAX_RETRIES) {
+                                retryCount++
+                                // Skip to near the very end (99.9%) to bypass the corrupted tail completely
+                                val retryPosition = (duration * 0.999f).toLong().coerceAtMost(duration - 100L)
+                                Log.d("PlaybackViewModel", "  - Skipping to near-end position: $retryPosition ms (remaining=${duration - retryPosition}ms)")
+
+                                // Cancel any existing retry job
+                                retryJob?.cancel()
+
+                                // Schedule retry with delay
+                                retryJob = scope.launch {
+                                    delay(RETRY_DELAY_MS)
+                                    if (isActive && currentMediaUrl != null) {
+                                        Log.d("PlaybackViewModel", "→ Skipping corrupted tail, resuming at 99.9%: $currentMediaUrl at position $retryPosition ms")
+                                        try {
+                                            playbackRepository.prepareAndPlay(currentMediaUrl!!, retryPosition)
+                                        } catch (e: Exception) {
+                                            Log.e("PlaybackViewModel", "✗ Retry failed: ${e.message}")
+                                        }
+                                    }
+                                }
+                            } else {
+                                Log.d("PlaybackViewModel", "→ Max retries reached, allowing playback to end gracefully")
+                                _isLoading.value = false
+                                // Don't trigger completion yet - let player reach STATE_ENDED naturally
+                            }
+                            return
+                        } else {
+                            // Still significant content remaining OR first EOF - skip ahead progressively
+                            val skipMs = if (isRetryLoop) 15000L else 5000L  // Skip 15 seconds if in retry loop, else 5 seconds
+                            Log.d("PlaybackViewModel", "→ Matroska EOF but ${timeToEnd}ms remaining - retrying to skip corrupted section (skip=${skipMs}ms, retryLoop=$isRetryLoop)")
+
+                            if (retryCount < MAX_RETRIES) {
+                                retryCount++
+                                val retryPosition = (currentPos + skipMs).coerceAtMost(duration)
+                                Log.d("PlaybackViewModel", "  - Retrying from position: $retryPosition ms (skip=${skipMs}ms, timeRemaining=${(duration - retryPosition)}ms after skip, retryCount=$retryCount/$MAX_RETRIES)")
+
+                                // Cancel any existing retry job
+                                retryJob?.cancel()
+
+                                // Schedule retry with delay
+                                retryJob = scope.launch {
+                                    delay(RETRY_DELAY_MS)
+                                    if (isActive && currentMediaUrl != null) {
+                                        Log.d("PlaybackViewModel", "→ Retrying playback of: $currentMediaUrl at position $retryPosition ms")
+                                        try {
+                                            playbackRepository.prepareAndPlay(currentMediaUrl!!, retryPosition)
+                                        } catch (e: Exception) {
+                                            Log.e("PlaybackViewModel", "✗ Retry failed: ${e.message}")
+                                        }
+                                    }
+                                }
+                            } else {
+                                Log.d("PlaybackViewModel", "→ Max retries ($MAX_RETRIES) reached for Matroska EOF, allowing playback to end naturally")
+                                _isLoading.value = false
+                                // Let player reach STATE_ENDED naturally rather than forcing completion
+                            }
+                            return
+                        }
+
+                    }
+                }
+
+                // SECOND PRIORITY: Check if error occurred near the end of the video
+                val isNearEnd = duration > 0 && (duration - currentPos) <= 5000L // Within 5 seconds of end
+                if (isNearEnd) {
+                    Log.d("PlaybackViewModel", "✓ Error near end of video ($currentPos/$duration), not retrying to allow episode completion")
+                    _isLoading.value = false
+                    return
+                }
+
+                // THIRD PRIORITY: Check if this is a network error
+                val isNetworkError = when {
+                    error.cause is java.net.SocketException -> true
+                    error.cause is java.net.SocketTimeoutException -> true
+                    error.cause is java.io.IOException -> true
+                    error.cause is java.net.ConnectException -> true
+                    error.cause is java.net.UnknownHostException -> true
+                    error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> true
+                    error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE -> true
+                    error.toString().lowercase().contains("network") -> true
+                    error.toString().lowercase().contains("connection") -> true
+                    error.toString().lowercase().contains("socket") -> true
+                    error.toString().lowercase().contains("timeout") -> true
+                    else -> false
+                }
+
+                if (isNetworkError && retryCount < MAX_RETRIES) {
+                    // Automatically retry on network errors
+                    retryCount++
+
+                    // IMPORTANT: Use current playback position at time of error, not the initial resume position
+                    // This ensures we resume from where the user was watching, not from the beginning
+                    val retryPosition = currentPos  // Use position at error time, not initial resume position
+                    Log.d("PlaybackViewModel", "✓ Network error detected at $currentPos ms, retrying ($retryCount/$MAX_RETRIES) after ${RETRY_DELAY_MS}ms")
+                    Log.d("PlaybackViewModel", "  - Will resume from: $retryPosition ms (current position at error)")
+                    Log.d("PlaybackViewModel", "  - NOT using initial resume position: $currentResumePosition ms")
+
+                    // Cancel any existing retry job
+                    retryJob?.cancel()
+
+                    // Schedule retry with delay
+                    retryJob = scope.launch {
+                        delay(RETRY_DELAY_MS)
+                        if (isActive && currentMediaUrl != null) {
+                            Log.d("PlaybackViewModel", "→ Retrying playback of: $currentMediaUrl at position $retryPosition ms")
+                            try {
+                                playbackRepository.prepareAndPlay(currentMediaUrl!!, retryPosition)
+                            } catch (e: Exception) {
+                                Log.e("PlaybackViewModel", "✗ Retry failed: ${e.message}")
+                            }
+                        }
+                    }
+                } else {
+                    // Too many retries or not a network error, don't retry
+                    _isLoading.value = false
+                    Log.e("PlaybackViewModel", "✗ Playback error not retryable (isNetwork=$isNetworkError, retryCount=$retryCount/$MAX_RETRIES)")
                 }
             }
 
@@ -232,6 +439,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                         }
                     }
 
+
                     // Merge with existing remote candidates (keep remote ones alongside embedded)
                     viewModelScope.launch(Dispatchers.Main) {
                         try {
@@ -270,17 +478,61 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                 delay(500) // Update every 500ms
             }
         }
+
+        // Start periodic resume position saving while playing
+        startResumeSaveJob()
+    }
+
+    private fun startResumeSaveJob() {
+        resumeSaveJob?.cancel()
+        resumeSaveJob = scope.launch {
+            while (isActive) {
+                delay(RESUME_SAVE_INTERVAL_MS)
+                // Save resume position periodically while playing
+                player?.let { p ->
+                    val mediaId = p.currentMediaItem?.mediaId ?: ""
+                    val currentPos = p.currentPosition
+                    val duration = p.duration
+
+                    // Only save if we have valid position and not near completion
+                    if (mediaId.isNotEmpty() && currentPos > 0L && duration > 0) {
+                        val percentComplete = (currentPos.toFloat() / duration) * 100
+                        // Don't save if very close to end (let onActivityStop handle it)
+                        if (percentComplete < 95f) {
+                            try {
+                                viewModelScope.launch(Dispatchers.IO) {
+                                    resumeRepository.saveResumePosition(mediaId, currentPos)
+                                    Log.d("PlaybackViewModel", "Periodic save: position=$currentPos for $mediaId")
+                                }
+                            } catch (e: Exception) {
+                                Log.e("PlaybackViewModel", "Error saving resume position: ${e.message}")
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private fun stopPlayerObserver() {
         playerStateJob?.cancel()
         playerStateJob = null
+        resumeSaveJob?.cancel()
+        resumeSaveJob = null
     }
 
     fun playMedia(url: String?, externalResumePositionMs: Long = 0L) {
         if (url == null) return
+
+        // Store current media info for potential retries
+        currentMediaUrl = url
         _isAudioBoostEnabled.value = false // Reset boost on new media
         _isLoading.value = true // Start loading
+        retryCount = 0 // Reset retry counter for new media
+        matroskaEOFRetryCount = 0 // Reset Matroska EOF retry loop counter
+        lastMatroskaEOFPosition = 0L // Reset last EOF position
+        retryJob?.cancel() // Cancel any pending retries
+
         initializePlayer() // Re-initialize if released
         _title.value = url.substringAfterLast('/') // Simple title extraction
         scope.launch {
@@ -295,9 +547,20 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
                 } catch (_: Exception) {
                     resumeRepository.getResumePosition(url)
                 }
-                Log.d("PlaybackViewModel", "playMedia: url=$url using local resume position=$localResume")
-                localResume
+                // Only use local resume if it's non-zero (0 means it was cleared because episode completed)
+                if (localResume > 0L) {
+                    Log.d("PlaybackViewModel", "playMedia: url=$url using local resume position=$localResume ms")
+                    localResume
+                } else {
+                    Log.d("PlaybackViewModel", "playMedia: url=$url resume position was 0 (cleared), starting from beginning")
+                    0L
+                }
             }
+
+            // Store resume position for potential retries
+            currentResumePosition = resumePosition
+
+            Log.d("PlaybackViewModel", "playMedia: final resumePosition=$resumePosition ms, preparing playback")
             playbackRepository.prepareAndPlay(url, resumePosition)
             // Reset subtitles state for new media
             _availableSubtitles.value = emptyList()
@@ -515,6 +778,7 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         _isAudioBoostEnabled.value = !_isAudioBoostEnabled.value
         playbackRepository.setAudioBoost(_isAudioBoostEnabled.value)
     }
+    @OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun updateTrackLists(tracks: Tracks) {
         val audioTracks = mutableListOf<AudioTrackInfo>()
         var selectedIndex = 0
@@ -651,6 +915,9 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun release() {
+        // ...existing code...
+        retryJob?.cancel()
+        retryJob = null
         onActivityStop()
         playbackRepository.release()
         this.player = null
@@ -665,7 +932,33 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
     fun onActivityStop() {
         player?.let {
             viewModelScope.launch {
-                resumeRepository.saveResumePosition(it.currentMediaItem?.mediaId ?: "", it.currentPosition)
+                val mediaId = it.currentMediaItem?.mediaId ?: ""
+                val currentPos = it.currentPosition
+                val currentDuration = it.duration
+
+                // Use current duration if valid, otherwise fallback to last known good duration
+                val duration = if (currentDuration > 0) currentDuration else lastKnownDurationMs
+
+                Log.d("PlaybackViewModel", "onActivityStop: mediaId=$mediaId, currentPos=$currentPos, duration=$duration (current=$currentDuration, lastKnown=$lastKnownDurationMs)")
+
+                // Detect if playback is near or at completion:
+                // 1. Position is within 2 minutes of the end (for episodes/movies you skipped ahead on)
+                // 2. Position is >= 95% of duration (normal completion)
+                val NEAR_END_THRESHOLD_MS = 120_000L // 2 minutes
+                val completionThreshold = 0.95f
+
+                val isNearEnd = duration > 0 && (duration - currentPos) <= NEAR_END_THRESHOLD_MS
+                val isCompleted = duration > 0 && currentPos >= (duration * completionThreshold)
+                val shouldClear = isNearEnd || isCompleted
+
+                if (shouldClear) {
+                    Log.d("PlaybackViewModel", "onActivityStop: Near/at end ($currentPos/$duration, nearEnd=$isNearEnd, completed=$isCompleted), clearing resume position")
+                    // Save position 0 to clear the resume point for this media
+                    resumeRepository.saveResumePosition(mediaId, 0L)
+                } else {
+                    Log.d("PlaybackViewModel", "onActivityStop: Saving resume position $currentPos for $mediaId")
+                    resumeRepository.saveResumePosition(mediaId, currentPos)
+                }
             }
         }
     }
@@ -704,6 +997,19 @@ class PlaybackViewModel(application: Application) : AndroidViewModel(application
         player?.let {
             val seekPosition = (fraction * it.duration).toLong()
             it.seekTo(seekPosition)
+
+            // Save the new position immediately after seeking
+            val mediaId = it.currentMediaItem?.mediaId ?: ""
+            if (mediaId.isNotEmpty()) {
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        resumeRepository.saveResumePosition(mediaId, seekPosition)
+                        Log.d("PlaybackViewModel", "Seek position saved: position=$seekPosition for $mediaId")
+                    } catch (e: Exception) {
+                        Log.e("PlaybackViewModel", "Error saving seek position: ${e.message}")
+                    }
+                }
+            }
         }
     }
 }

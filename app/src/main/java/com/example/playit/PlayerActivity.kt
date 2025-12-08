@@ -49,8 +49,9 @@ class PlayerActivityMinimal : ComponentActivity() {
     private var isTvShow: Boolean = false
 
     // Playback completion tracking
-    private var playbackCompletionJob: Job? = null
     private var hasCompletionHandled: Boolean = false
+    private var completionListener: androidx.media3.common.Player.Listener? = null
+    private var resultIntentAlreadySet: Boolean = false  // Track if we've explicitly set result for next episode
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -85,9 +86,20 @@ class PlayerActivityMinimal : ComponentActivity() {
                 dataUri?.getQueryParameter("episode")?.toIntOrNull()
             } catch (_: Exception) { null }
 
+        // If season/episode still not found, try to extract from filename
+        // Supports patterns like "S03E02", "3x02", "Season 3 Episode 2"
+        if (season == null || episode == null) {
+            val filename = mediaUrl?.substringAfterLast('/')?.substringBefore('?') ?: ""
+            val seEpisode = parseSeasonEpisodeFromFilename(filename)
+            if (seEpisode != null) {
+                season = seEpisode.first
+                episode = seEpisode.second
+                android.util.Log.d("PlayerActivityMinimal", "✓ Extracted from filename: S${season}E${episode}")
+            }
+        }
+
         // Determine if this is a TV show (has season and episode info)
-        isTvShow = (season != null && episode != null) ||
-                   (!imdbId.isNullOrEmpty() && season != null && episode != null)
+        isTvShow = season != null && episode != null
 
         android.util.Log.d("PlayerActivityMinimal", "TV Show metadata: imdbId=$imdbId, season=$season, episode=$episode, isTvShow=$isTvShow")
 
@@ -148,17 +160,33 @@ class PlayerActivityMinimal : ComponentActivity() {
 
         // Start monitoring for playback completion
         startPlaybackCompletionMonitor()
+
+        // Set up callback for ViewModel to trigger completion (for error scenarios like subtitle EOF)
+        playbackViewModel.onPlaybackCompletionCallback = {
+            if (!hasCompletionHandled) {
+                hasCompletionHandled = true
+                android.util.Log.d("PlayerActivityMinimal", "✓ Completion triggered from error handler (subtitle EOF)")
+                handlePlaybackCompletion()
+            }
+        }
     }
 
     override fun finish() {
         try { reporterJob?.cancel() } catch (_: Exception) {}
-        try { playbackCompletionJob?.cancel() } catch (_: Exception) {}
+
+        // Clean up playback completion listener
+        try {
+            completionListener?.let { listener ->
+                playbackViewModel.player?.removeListener(listener)
+            }
+        } catch (_: Exception) {}
 
         val posMs = playbackViewModel.player?.currentPosition ?: 0L
         val durMs = playbackViewModel.player?.duration ?: 0L
 
         // If Stremio asked for result via return_result flag, return it via setResult
-        if (shouldReturnResult) {
+        // BUT: Don't overwrite if we've already explicitly set result for next episode
+        if (shouldReturnResult && !resultIntentAlreadySet) {
             android.util.Log.d("PlayerActivityMinimal", "Returning result: position=${posMs}ms, duration=${durMs}ms")
 
             // Follow MPV-Android pattern: create result intent with original data preserved
@@ -182,6 +210,8 @@ class PlayerActivityMinimal : ComponentActivity() {
             try {
                 Thread.sleep(100)
             } catch (_: Exception) {}
+        } else if (resultIntentAlreadySet) {
+            android.util.Log.d("PlayerActivityMinimal", "Result already explicitly set for next episode, not overwriting")
         }
 
         // If callback URL exists, also send final "stopped" event via JSON-RPC
@@ -234,73 +264,88 @@ class PlayerActivityMinimal : ComponentActivity() {
 
     /**
      * Monitor playback state and handle auto-exit (movies) or auto-play next episode (TV shows)
+     * Uses Media3 Player.Listener to detect actual playback completion (STATE_ENDED)
      */
     private fun startPlaybackCompletionMonitor() {
-        playbackCompletionJob = lifecycleScope.launch {
-            while (isActive) {
-                try {
-                    val p = playbackViewModel.player
-                    if (p != null) {
-                        val currentPos = p.currentPosition
-                        val duration = p.duration
-                        val isPlaying = p.isPlaying
+        val player = playbackViewModel.player ?: return
 
-                        // Check if playback has ended (current position near end of duration)
-                        if (duration > 0 && currentPos > 0 && isPlaying) {
-                            val percentWatched = (currentPos.toDouble() / duration.toDouble()) * 100
-
-                            // If 95% or more of the video is watched, consider it completed
-                            if (percentWatched >= 95 && !hasCompletionHandled) {
-                                hasCompletionHandled = true
-                                android.util.Log.d("PlayerActivityMinimal", "✓ Playback completion detected ($percentWatched% watched)")
-
-                                if (isTvShow && season != null && episode != null) {
-                                    android.util.Log.d("PlayerActivityMinimal", "→ TV Show detected: S${season}E${episode}, attempting next episode...")
-                                    attemptPlayNextEpisode()
-                                } else {
-                                    android.util.Log.d("PlayerActivityMinimal", "→ Movie completed, auto-exiting in 2 seconds...")
-                                    delay(2000)
-                                    finish()
-                                }
-                                return@launch
-                            }
-
-                            // Reset completion flag if user seeks back (in case they want to continue watching)
-                            if (percentWatched < 85) {
-                                hasCompletionHandled = false
-                            }
-                        }
+        // Create the listener object
+        val listener = object : androidx.media3.common.Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                // Only handle STATE_ENDED, which is the actual playback completion event
+                if (playbackState == androidx.media3.common.Player.STATE_ENDED) {
+                    if (hasCompletionHandled) {
+                        android.util.Log.d("PlayerActivityMinimal", "⚠ STATE_ENDED already handled, ignoring duplicate")
+                        return // Already handled completion
                     }
-                } catch (e: Exception) {
-                    android.util.Log.d("PlayerActivityMinimal", "Completion monitor error: ${e.message}")
-                }
 
-                delay(500) // Check every 500ms
+                    val posMs = player.currentPosition
+                    val durMs = player.duration
+                    android.util.Log.d("PlayerActivityMinimal", "✓ Playback STATE_ENDED detected at $posMs / $durMs ms")
+
+                    // Safeguard: only treat as true completion if position is within 1 second of duration
+                    // This prevents false STATE_ENDED from streaming/buffering issues
+                    val isReallyAtEnd = durMs > 0 && (durMs - posMs) <= 1000L
+                    if (!isReallyAtEnd) {
+                        android.util.Log.d("PlayerActivityMinimal", "⚠ STATE_ENDED detected but position not truly at end ($posMs/$durMs), ignoring")
+                        return
+                    }
+
+                    hasCompletionHandled = true
+                    handlePlaybackCompletion()
+                }
+            }
+        }
+
+        // Store listener reference for cleanup
+        completionListener = listener
+
+        // Add the listener to the player
+        player.addListener(listener)
+    }
+
+    /**
+     * Handle playback completion - can be called from STATE_ENDED or error handlers
+     */
+    private fun handlePlaybackCompletion() {
+        if (isTvShow && season != null && episode != null) {
+            android.util.Log.d("PlayerActivityMinimal", "→ TV Show detected: imdbId=$imdbId, S${season}E${episode}")
+            android.util.Log.d("PlayerActivityMinimal", "→ Callback URL available: ${!stremioCallbackUrl.isNullOrEmpty()}")
+            attemptPlayNextEpisode()
+        } else {
+            android.util.Log.d("PlayerActivityMinimal", "→ Movie detected (isTvShow=$isTvShow, season=$season, episode=$episode)")
+            android.util.Log.d("PlayerActivityMinimal", "→ Auto-exiting after movie playback...")
+            lifecycleScope.launch {
+                delay(1000) // Brief delay before exit
+                finish()
             }
         }
     }
 
     /**
      * Attempt to play the next episode (for TV shows)
-     * Sends a request back to Stremio to load the next episode
+     * Increments season/episode and returns to Stremio for it to provide next episode URL
+     * OR: For Stremio callback URLs, sends an event notification
+     * Always returns to app/Stremio for episode selection (let caller handle next episode)
      */
     private fun attemptPlayNextEpisode() {
         lifecycleScope.launch {
             try {
                 val currentSeason = season ?: return@launch
                 val currentEpisode = episode ?: return@launch
-                val showImdbId = imdbId ?: return@launch
 
-                android.util.Log.d("PlayerActivityMinimal", "Requesting next episode: S${currentSeason}E${currentEpisode + 1}")
+                android.util.Log.d("PlayerActivityMinimal", "Episode ended: S${currentSeason}E${currentEpisode}, attempting to load next episode")
 
-                // Send JSON-RPC call to Stremio to load next episode
+                // If callback URL exists, notify Stremio that episode has finished
                 if (!stremioCallbackUrl.isNullOrEmpty()) {
+                    android.util.Log.d("PlayerActivityMinimal", "Callback URL available, sending notification for next episode")
                     withContext(Dispatchers.IO) {
                         try {
+                            // Send an "episodeEnded" event to signal to Stremio to load next episode
                             val payload = String.format(
                                 Locale.US,
-                                """{"jsonrpc":"2.0","method":"nextEpisode","params":{"imdbId":"%s","season":%d,"episode":%d}}""",
-                                showImdbId, currentSeason, currentEpisode + 1
+                                """{"jsonrpc":"2.0","method":"episodeEnded","params":{"season":%d,"episode":%d}}""",
+                                currentSeason, currentEpisode
                             )
 
                             val connUrl = URL(stremioCallbackUrl)
@@ -317,27 +362,53 @@ class PlayerActivityMinimal : ComponentActivity() {
                             out.close()
 
                             val responseCode = conn.responseCode
-                            android.util.Log.d("PlayerActivityMinimal", "Next episode request response: $responseCode")
+                            android.util.Log.d("PlayerActivityMinimal", "Episode ended notification response: $responseCode")
                             conn.disconnect()
-
-                            // Give Stremio time to process and load the next episode
-                            delay(2000)
-                            finish()
                         } catch (e: Exception) {
-                            android.util.Log.e("PlayerActivityMinimal", "Error requesting next episode: ${e.message}")
-                            // Fallback: just finish the activity and let user manually select next episode
-                            delay(1000)
-                            finish()
+                            android.util.Log.e("PlayerActivityMinimal", "Error notifying episode end: ${e.message}")
                         }
                     }
-                } else {
-                    // No callback URL, just exit and let user handle next episode manually
-                    android.util.Log.d("PlayerActivityMinimal", "No callback URL available, exiting player")
+
+                    // Stremio will load next episode, wait and then finish
                     delay(1000)
+                    finish()
+                } else if (shouldReturnResult) {
+                    // No callback URL, but Stremio is using return_result
+                    // Return result with COMPLETED position so Stremio detects episode completion
+                    // Stremio's own logic (Trakt) will then auto-load next episode
+                    android.util.Log.d("PlayerActivityMinimal", "No callback URL, using return_result with completed position")
+
+                    val posMs = playbackViewModel.player?.currentPosition ?: 0L
+                    val durMs = playbackViewModel.player?.duration ?: 0L
+
+                    // Return with position = duration to signal episode completion
+                    // Stremio will detect this as completion and load next episode
+                    val resultIntent = Intent().apply {
+                        // Preserve the original intent's data (the video URL)
+                        data = intent?.data
+                        // Set position to duration to signal completion
+                        putExtra("position", durMs.toInt())  // Complete position
+                        putExtra("duration", durMs.toInt())
+                        putExtra("startfrom", intent?.getIntExtra("startfrom", 0) ?: 0)
+                        putExtra("return_result", true)
+                    }
+
+                    android.util.Log.d("PlayerActivityMinimal", "Returning result with completion: position=$durMs (=duration), letting Stremio detect completion")
+
+                    setResult(RESULT_OK, resultIntent)
+                    resultIntentAlreadySet = true  // Mark that we've set the result explicitly
+                    delay(500)
+                    finish()
+                } else {
+                    // No callback and no return_result - just exit
+                    android.util.Log.d("PlayerActivityMinimal", "No callback URL or return_result, exiting")
+                    delay(500)
                     finish()
                 }
             } catch (e: Exception) {
                 android.util.Log.e("PlayerActivityMinimal", "attemptPlayNextEpisode error: ${e.message}")
+                delay(500)
+                finish()
             }
         }
     }
@@ -404,5 +475,35 @@ class PlayerActivityMinimal : ComponentActivity() {
         } finally {
             try { conn?.disconnect() } catch (_: Exception) {}
         }
+    }
+
+    /**
+     * Parse season and episode from filename patterns like "S03E02" or "3x02"
+     * Returns Pair<season, episode> or null if not found
+     */
+    private fun parseSeasonEpisodeFromFilename(filename: String): Pair<Int, Int>? {
+        // Try pattern: S03E02 or s03e02
+        val sERegex = Regex("(?i)[Ss](\\d{1,2})[Ee](\\d{1,2})")
+        sERegex.find(filename)?.let { match ->
+            val (s, e) = match.destructured
+            val season = s.toIntOrNull()
+            val episode = e.toIntOrNull()
+            if (season != null && episode != null) {
+                return Pair(season, episode)
+            }
+        }
+
+        // Try pattern: 3x02 or 03x02
+        val xRegex = Regex("(\\d{1,2})[Xx](\\d{1,2})")
+        xRegex.find(filename)?.let { match ->
+            val (s, e) = match.destructured
+            val season = s.toIntOrNull()
+            val episode = e.toIntOrNull()
+            if (season != null && episode != null) {
+                return Pair(season, episode)
+            }
+        }
+
+        return null
     }
 }

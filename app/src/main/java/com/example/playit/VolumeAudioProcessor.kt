@@ -10,16 +10,26 @@ import java.nio.ByteBuffer
 @UnstableApi
 class VolumeAudioProcessor : BaseAudioProcessor() {
 
+    private var boostEnabled = false
     private var volume = 1.0f
+
+    // Compressor state for dynamic range compression
+    private var compressorGain = 1.0f
+
+    // High-pass filter state (to amplify dialog: 1-4 kHz range)
+    private var dialogBoostPrev1 = 0f
+    private var dialogBoostPrev2 = 0f
 
     fun setVolume(volume: Float) {
         this.volume = volume.coerceIn(0.5f, 3.0f)
     }
 
+    fun setBoostEnabled(enabled: Boolean) {
+        boostEnabled = enabled
+    }
+
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
-        // FIX 1: Always return the input format.
-        // We will decide in queueInput whether to process it or just copy it.
-        Log.d("VolumeAudioProcessor", "onConfigure: encoding=${inputAudioFormat.encoding}, sampleRate=${inputAudioFormat.sampleRate}, channelCount=${inputAudioFormat.channelCount}")
+        Log.d("VolumeAudioProcessor", "onConfigure: encoding=${inputAudioFormat.encoding}, sampleRate=${inputAudioFormat.sampleRate}, channelCount=${inputAudioFormat.channelCount}, boost=$boostEnabled")
         return inputAudioFormat
     }
 
@@ -27,7 +37,7 @@ class VolumeAudioProcessor : BaseAudioProcessor() {
         val remaining = inputBuffer.remaining()
         if (remaining == 0) return
 
-        // FIX 2: Check if this is a format we can actually process (16-bit or Float)
+        // Check if this is a format we can process (16-bit or Float)
         if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT &&
             inputAudioFormat.encoding != C.ENCODING_PCM_FLOAT) {
             // Passthrough: Just copy the data directly without touching it
@@ -38,30 +48,128 @@ class VolumeAudioProcessor : BaseAudioProcessor() {
             return
         }
 
-        // Processing Logic for supported formats
-        Log.d("VolumeAudioProcessor", "queueInput: processing PCM encoding=${inputAudioFormat.encoding} bytes=$remaining volume=$volume")
+        Log.d("VolumeAudioProcessor", "queueInput: processing PCM encoding=${inputAudioFormat.encoding} bytes=$remaining volume=$volume boost=$boostEnabled")
         val outputBuffer = replaceOutputBuffer(remaining)
 
         when (inputAudioFormat.encoding) {
             C.ENCODING_PCM_16BIT -> {
-                while (inputBuffer.hasRemaining()) {
-                    val sample = inputBuffer.getShort()
-                    val processed = (sample * volume).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                    outputBuffer.putShort(processed.toShort())
-                }
+                processAudio16Bit(inputBuffer, outputBuffer)
             }
             C.ENCODING_PCM_FLOAT -> {
-                while (inputBuffer.hasRemaining()) {
-                    val sample = inputBuffer.getFloat()
-                    val processed = (sample * volume).coerceIn(-1.0f, 1.0f)
-                    outputBuffer.putFloat(processed)
-                }
+                processAudioFloat(inputBuffer, outputBuffer)
             }
             else -> {
-                // Should not be reached due to the check above, but safe fallback
                 outputBuffer.put(inputBuffer)
             }
         }
         outputBuffer.flip()
+    }
+
+    private fun processAudio16Bit(inputBuffer: ByteBuffer, outputBuffer: ByteBuffer) {
+        while (inputBuffer.hasRemaining()) {
+            val sample = inputBuffer.getShort().toFloat() / 32768f // Normalize to -1.0 to 1.0
+            val processed = processAudioSample(sample)
+            val clipped = (processed * 32768f).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            outputBuffer.putShort(clipped.toShort())
+        }
+    }
+
+    private fun processAudioFloat(inputBuffer: ByteBuffer, outputBuffer: ByteBuffer) {
+        while (inputBuffer.hasRemaining()) {
+            val sample = inputBuffer.getFloat()
+            val processed = processAudioSample(sample)
+            outputBuffer.putFloat(processed.coerceIn(-1.0f, 1.0f))
+        }
+    }
+
+    private fun processAudioSample(sample: Float): Float {
+        var output = sample
+
+        // Step 1: Apply base volume
+        output *= volume
+
+        if (boostEnabled) {
+            // Step 2: Dialog amplification (1-4 kHz boost using high-pass filter)
+            // This emphasizes speech clarity without harsh distortion
+            output = applyDialogBoost(output)
+
+            // Step 3: Dynamic range compression
+            // Reduces loud peaks while amplifying quiet signals
+            output = applyDynamicCompression(output)
+
+            // Step 4: Soft limiting to catch any remaining peaks
+            output = applySoftLimiter(output)
+        }
+
+        return output
+    }
+
+    /**
+     * Applies psychoacoustic dialog boost.
+     * Enhances the 1-4 kHz range where human speech is most intelligible.
+     * Uses a simple shelving filter approach.
+     */
+    private fun applyDialogBoost(sample: Float): Float {
+        // Simple high-pass + peaking filter for dialog enhancement
+        // Coefficient for ~2 kHz peaking at 48kHz sample rate
+        val dialogGain = 1.4f // 40% boost to dialog frequencies
+
+        // Apply a basic peaking filter using previous samples
+        val filtered = sample * 0.6f + dialogBoostPrev1 * 0.3f + dialogBoostPrev2 * 0.1f
+        dialogBoostPrev2 = dialogBoostPrev1
+        dialogBoostPrev1 = sample
+
+        return filtered * dialogGain
+    }
+
+    /**
+     * Dynamic range compression:
+     * - Amplifies quiet signals (below threshold)
+     * - Reduces loud signals (above threshold)
+     * - Prevents clipping while maintaining punch
+     */
+    private fun applyDynamicCompression(sample: Float): Float {
+        val threshold = 0.6f  // Compression kicks in above 60% amplitude
+        val ratio = 4.0f      // 4:1 compression ratio
+        val kneeWidth = 0.1f  // Smooth knee for natural sound
+        val makeup = 1.15f    // Makeup gain to compensate for compression
+
+        val absSignal = kotlin.math.abs(sample)
+
+        val gain = if (absSignal < (threshold - kneeWidth)) {
+            // Below threshold: slightly amplify quiet signals
+            1.1f
+        } else if (absSignal > (threshold + kneeWidth)) {
+            // Above threshold: compress
+            val excess = absSignal - threshold
+            val compressed = excess / ratio
+            val newLevel = threshold + compressed
+            newLevel / absSignal
+        } else {
+            // In the knee region: smooth transition
+            val kneeGain = 1.1f + ((threshold - absSignal) / kneeWidth) * 0.2f
+            kneeGain / absSignal.coerceAtLeast(0.001f)
+        }
+
+        return (sample * gain * makeup).coerceIn(-1.0f, 1.0f)
+    }
+
+    /**
+     * Soft limiter to catch any peaks that slip through.
+     * Uses a tanh-like soft clipping to prevent harsh digital clipping.
+     */
+    private fun applySoftLimiter(sample: Float): Float {
+        val limit = 0.95f
+        val absSignal = kotlin.math.abs(sample)
+
+        return if (absSignal <= limit) {
+            sample
+        } else {
+            // Soft knee limiting using tanh-like curve
+            val excess = absSignal - limit
+            val limitFactor = kotlin.math.tanh(excess * 2.0f) / 2.0f
+            val limitedAbs = limit + limitFactor
+            sample * (limitedAbs / absSignal).coerceAtMost(1.0f)
+        }
     }
 }

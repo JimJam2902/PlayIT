@@ -47,6 +47,7 @@ fun SubtitleMenuPopup(
     var searchResults by remember { mutableStateOf<List<SubtitleEntry>>(emptyList()) }
     var searchQuery by remember { mutableStateOf("") }
     var isSearching by remember { mutableStateOf(false) }
+    var searchError by remember { mutableStateOf<String?>(null) }
 
     val firstItemFocusRequester = remember { FocusRequester() }
     val searchFieldFocusRequester = remember { FocusRequester() }
@@ -117,7 +118,10 @@ fun SubtitleMenuPopup(
                 ) {
                     OutlinedTextField(
                         value = searchQuery,
-                        onValueChange = { searchQuery = it },
+                        onValueChange = {
+                            searchQuery = it
+                            searchError = null  // Clear error when user starts typing
+                        },
                         label = { Text("Search subtitles") },
                         singleLine = true,
                         modifier = Modifier
@@ -132,35 +136,63 @@ fun SubtitleMenuPopup(
                         onClick = {
                             if (searchQuery.isNotBlank()) {
                                 isSearching = true
+                                searchError = null
+                                searchResults = emptyList()  // Clear previous results
                                 viewModel.searchSubtitles(searchQuery, "en", null, null) { results ->
-                                    @Suppress("ConvertMapNotNullToMapNotNull")
-                                    val mapped = results.mapNotNull { s ->
-                                        val fileId = s.attributes.files.firstOrNull()?.fileId
-                                        SubtitleEntry(
-                                            fileId = fileId,
-                                            language = s.attributes.language,
-                                            downloadCount = s.attributes.downloadCount,
-                                            source = "opensubtitles",
-                                            localFilePath = null,
-                                            displayLabel = "${s.attributes.language} (${s.attributes.downloadCount} DLs)",
-                                            groupIndex = null,
-                                            trackIndex = null,
-                                            isEmbedded = false
-                                        )
-                                    }
-                                    searchResults = mapped
                                     isSearching = false
+                                    if (results.isEmpty()) {
+                                        searchError = "No subtitles found for: $searchQuery"
+                                    } else {
+                                        @Suppress("ConvertMapNotNullToMapNotNull")
+                                        val mapped = results.mapNotNull { s ->
+                                            val fileId = s.attributes.files.firstOrNull()?.fileId
+                                            SubtitleEntry(
+                                                fileId = fileId,
+                                                language = s.attributes.language,
+                                                downloadCount = s.attributes.downloadCount,
+                                                source = "opensubtitles",
+                                                localFilePath = null,
+                                                displayLabel = "${s.attributes.language} (${s.attributes.downloadCount} DLs)",
+                                                groupIndex = null,
+                                                trackIndex = null,
+                                                isEmbedded = false
+                                            )
+                                        }
+                                        searchResults = mapped
+                                    }
                                 }
+                            } else {
+                                searchError = "Please enter a search query"
                             }
                         },
                         modifier = Modifier.clip(RoundedCornerShape(6.dp)),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0366D6))
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0366D6)),
+                        enabled = !isSearching
                     ) {
                         SearchButtonIcon()
                     }
                 }
 
                 Spacer(Modifier.height(12.dp))
+
+                // Error message display
+                if (searchError != null) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp)),
+                        color = Color(0xFF4A2A2A),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            searchError!!,
+                            color = Color(0xFFFF9999),
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
 
                 // Combined list (embedded + search results) - scrollable, takes up available space
                 LazyColumn(modifier = Modifier.weight(1f)) {
@@ -180,7 +212,11 @@ fun SubtitleMenuPopup(
                                 modifier = Modifier.fillMaxWidth().padding(24.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                CircularProgressIndicator(color = Color.White)
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    CircularProgressIndicator(color = Color.White)
+                                    Spacer(Modifier.height(8.dp))
+                                    Text("Searching for subtitles...", color = Color.Gray, fontSize = 12.sp)
+                                }
                             }
                         }
                     } else {
