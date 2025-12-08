@@ -10,6 +10,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.media3.common.util.UnstableApi
+import androidx.core.net.toUri
 import com.example.playit.ui.theme.PlayITTheme
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
@@ -47,17 +48,21 @@ class PlayerActivityMinimal : ComponentActivity() {
     private var season: Int? = null
     private var episode: Int? = null
     private var isTvShow: Boolean = false
+    private var mediaUrl: String? = null
 
     // Playback completion tracking
     private var hasCompletionHandled: Boolean = false
     private var completionListener: androidx.media3.common.Player.Listener? = null
     private var resultIntentAlreadySet: Boolean = false  // Track if we've explicitly set result for next episode
 
+    // TMDB fallback for next episode lookup
+    private val tmdbClient = TMDBClient()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val dataUri = intent?.data
-        val mediaUrl = dataUri?.toString()
+        mediaUrl = dataUri?.toString()
 
         android.util.Log.d("PlayerActivityMinimal", "=== INTENT DATA ===")
         android.util.Log.d("PlayerActivityMinimal", "Intent URI: $dataUri")
@@ -324,9 +329,9 @@ class PlayerActivityMinimal : ComponentActivity() {
 
     /**
      * Attempt to play the next episode (for TV shows)
-     * Increments season/episode and returns to Stremio for it to provide next episode URL
-     * OR: For Stremio callback URLs, sends an event notification
-     * Always returns to app/Stremio for episode selection (let caller handle next episode)
+     * 1. First tries: Stremio callback URL (if available)
+     * 2. Fallback: TMDB-based next episode lookup + auto-play
+     * 3. Last resort: Return to Stremio for manual selection
      */
     private fun attemptPlayNextEpisode() {
         lifecycleScope.launch {
@@ -338,78 +343,161 @@ class PlayerActivityMinimal : ComponentActivity() {
 
                 // If callback URL exists, notify Stremio that episode has finished
                 if (!stremioCallbackUrl.isNullOrEmpty()) {
-                    android.util.Log.d("PlayerActivityMinimal", "Callback URL available, sending notification for next episode")
-                    withContext(Dispatchers.IO) {
-                        try {
-                            // Send an "episodeEnded" event to signal to Stremio to load next episode
-                            val payload = String.format(
-                                Locale.US,
-                                """{"jsonrpc":"2.0","method":"episodeEnded","params":{"season":%d,"episode":%d}}""",
-                                currentSeason, currentEpisode
-                            )
-
-                            val connUrl = URL(stremioCallbackUrl)
-                            val conn = connUrl.openConnection() as HttpURLConnection
-                            conn.connectTimeout = 5000
-                            conn.readTimeout = 5000
-                            conn.requestMethod = "POST"
-                            conn.doOutput = true
-                            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-
-                            val out = BufferedOutputStream(conn.outputStream)
-                            out.write(payload.toByteArray(StandardCharsets.UTF_8))
-                            out.flush()
-                            out.close()
-
-                            val responseCode = conn.responseCode
-                            android.util.Log.d("PlayerActivityMinimal", "Episode ended notification response: $responseCode")
-                            conn.disconnect()
-                        } catch (e: Exception) {
-                            android.util.Log.e("PlayerActivityMinimal", "Error notifying episode end: ${e.message}")
-                        }
-                    }
-
-                    // Stremio will load next episode, wait and then finish
+                    android.util.Log.d("PlayerActivityMinimal", "✓ Callback URL available, sending notification for next episode")
+                    notifyStremioViaCallback(currentSeason, currentEpisode)
                     delay(1000)
                     finish()
-                } else if (shouldReturnResult) {
-                    // No callback URL, but Stremio is using return_result
-                    // Return result with COMPLETED position so Stremio detects episode completion
-                    // Stremio's own logic (Trakt) will then auto-load next episode
-                    android.util.Log.d("PlayerActivityMinimal", "No callback URL, using return_result with completed position")
-
-                    val posMs = playbackViewModel.player?.currentPosition ?: 0L
-                    val durMs = playbackViewModel.player?.duration ?: 0L
-
-                    // Return with position = duration to signal episode completion
-                    // Stremio will detect this as completion and load next episode
-                    val resultIntent = Intent().apply {
-                        // Preserve the original intent's data (the video URL)
-                        data = intent?.data
-                        // Set position to duration to signal completion
-                        putExtra("position", durMs.toInt())  // Complete position
-                        putExtra("duration", durMs.toInt())
-                        putExtra("startfrom", intent?.getIntExtra("startfrom", 0) ?: 0)
-                        putExtra("return_result", true)
-                    }
-
-                    android.util.Log.d("PlayerActivityMinimal", "Returning result with completion: position=$durMs (=duration), letting Stremio detect completion")
-
-                    setResult(RESULT_OK, resultIntent)
-                    resultIntentAlreadySet = true  // Mark that we've set the result explicitly
-                    delay(500)
-                    finish()
                 } else {
-                    // No callback and no return_result - just exit
-                    android.util.Log.d("PlayerActivityMinimal", "No callback URL or return_result, exiting")
-                    delay(500)
-                    finish()
+                    // No callback URL - try TMDB fallback for independent next episode lookup
+                    android.util.Log.d("PlayerActivityMinimal", "✗ No Stremio callback URL, attempting TMDB fallback auto-play")
+                    attemptTMDBAutoNextEpisode(currentSeason, currentEpisode)
                 }
             } catch (e: Exception) {
                 android.util.Log.e("PlayerActivityMinimal", "attemptPlayNextEpisode error: ${e.message}")
                 delay(500)
                 finish()
             }
+        }
+    }
+
+    /**
+     * Attempt to auto-play next episode using TMDB lookup
+     * This is a fallback when Stremio doesn't provide a callback URL
+     */
+    private suspend fun attemptTMDBAutoNextEpisode(currentSeason: Int, currentEpisode: Int) {
+        try {
+            android.util.Log.d("PlayerActivityMinimal", "→ TMDB Fallback: Looking up next episode S${currentSeason}E${currentEpisode + 1}")
+
+            // Extract show name from URL/filename
+            val showName: String? = if (mediaUrl != null && mediaUrl!!.isNotEmpty()) {
+                tmdbClient.extractShowNameFromUrl(mediaUrl!!)
+            } else null
+
+            if (showName == null || showName.isEmpty()) {
+                android.util.Log.w("PlayerActivityMinimal", "⚠ Could not extract show name from URL, falling back to standard return")
+                returnToStremioWithCompletion(currentSeason, currentEpisode)
+                return
+            }
+
+            android.util.Log.d("PlayerActivityMinimal", "→ Extracted show name: '$showName'")
+
+            // Attempt to fetch next episode stream from TMDB
+            val nextEpisodeStream: String? = withContext(Dispatchers.IO) {
+                tmdbClient.fetchNextEpisodeStreamUrl(showName, currentSeason, currentEpisode + 1)
+            }
+
+            if (nextEpisodeStream != null && nextEpisodeStream.isNotEmpty()) {
+                android.util.Log.d("PlayerActivityMinimal", "✓ TMDB: Found next episode stream, auto-playing S${currentSeason}E${currentEpisode + 1}")
+                playNextEpisodeDirectly(nextEpisodeStream, currentSeason, currentEpisode + 1)
+            } else {
+                android.util.Log.w("PlayerActivityMinimal", "⚠ TMDB: Could not find next episode stream, returning to Stremio")
+                returnToStremioWithCompletion(currentSeason, currentEpisode)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("PlayerActivityMinimal", "TMDB auto-play error: ${e.message}, falling back to standard return")
+            returnToStremioWithCompletion(currentSeason, currentEpisode)
+        }
+    }
+
+    /**
+     * Play next episode directly without returning to Stremio
+     * Simulates Stremio's auto-play behavior
+     */
+    private suspend fun playNextEpisodeDirectly(
+        nextEpisodeUrl: String,
+        nextSeason: Int,
+        nextEpisode: Int
+    ) {
+        try {
+            android.util.Log.d("PlayerActivityMinimal", "🚀 Auto-playing next episode: S${nextSeason}E${nextEpisode}")
+            android.util.Log.d("PlayerActivityMinimal", "   URL: $nextEpisodeUrl")
+
+            // Create an intent to play the next episode
+            val nextIntent = Intent(Intent.ACTION_VIEW).apply {
+                data = nextEpisodeUrl.toUri()
+                putExtra("season", nextSeason)
+                putExtra("episode", nextEpisode)
+                putExtra("return_result", shouldReturnResult)
+                // Start from beginning of next episode
+                putExtra("startfrom", 0)
+            }
+
+            // Return this intent as result to launch next episode
+            setResult(RESULT_OK, nextIntent)
+            resultIntentAlreadySet = true
+
+            delay(500)
+            finish()
+        } catch (e: Exception) {
+            android.util.Log.e("PlayerActivityMinimal", "Error playing next episode directly: ${e.message}")
+            returnToStremioWithCompletion(nextSeason - 1, nextEpisode - 1)
+        }
+    }
+
+    /**
+     * Return to Stremio with completion signal
+     * Lets Stremio handle next episode selection/playback
+     */
+    private suspend fun returnToStremioWithCompletion(lastSeason: Int, lastEpisode: Int) {
+        try {
+            android.util.Log.d("PlayerActivityMinimal", "↩ Returning to Stremio with completion signal for S${lastSeason}E${lastEpisode}")
+
+            if (shouldReturnResult) {
+                val durMs = playbackViewModel.player?.duration ?: 0L
+
+                val resultIntent = Intent().apply {
+                    data = intent?.data
+                    putExtra("position", durMs.toInt())  // Signal completion
+                    putExtra("duration", durMs.toInt())
+                    putExtra("startfrom", intent?.getIntExtra("startfrom", 0) ?: 0)
+                    putExtra("return_result", true)
+                }
+
+                android.util.Log.d("PlayerActivityMinimal", "Returning result with completion: position=$durMs (=duration)")
+                setResult(RESULT_OK, resultIntent)
+                resultIntentAlreadySet = true
+            }
+
+            delay(500)
+            finish()
+        } catch (e: Exception) {
+            android.util.Log.e("PlayerActivityMinimal", "Error returning to Stremio: ${e.message}")
+            delay(500)
+            finish()
+        }
+    }
+
+    /**
+     * Notify Stremio via callback URL that episode has ended
+     */
+    private suspend fun notifyStremioViaCallback(season: Int, episode: Int) {
+        try {
+            withContext(Dispatchers.IO) {
+                val payload = String.format(
+                    Locale.US,
+                    """{"jsonrpc":"2.0","method":"episodeEnded","params":{"season":%d,"episode":%d}}""",
+                    season, episode
+                )
+
+                val connUrl = URL(stremioCallbackUrl)
+                val conn = connUrl.openConnection() as HttpURLConnection
+                conn.connectTimeout = 5000
+                conn.readTimeout = 5000
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+
+                val out = BufferedOutputStream(conn.outputStream)
+                out.write(payload.toByteArray(StandardCharsets.UTF_8))
+                out.flush()
+                out.close()
+
+                val responseCode = conn.responseCode
+                android.util.Log.d("PlayerActivityMinimal", "Callback notification response: $responseCode")
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("PlayerActivityMinimal", "Error notifying callback: ${e.message}")
         }
     }
 
