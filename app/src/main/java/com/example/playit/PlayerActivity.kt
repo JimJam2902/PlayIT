@@ -55,8 +55,6 @@ class PlayerActivityMinimal : ComponentActivity() {
     private var completionListener: androidx.media3.common.Player.Listener? = null
     private var resultIntentAlreadySet: Boolean = false  // Track if we've explicitly set result for next episode
 
-    // TMDB fallback for next episode lookup
-    private val tmdbClient = TMDBClient()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -348,9 +346,9 @@ class PlayerActivityMinimal : ComponentActivity() {
                     delay(1000)
                     finish()
                 } else {
-                    // No callback URL - try TMDB fallback for independent next episode lookup
-                    android.util.Log.d("PlayerActivityMinimal", "✗ No Stremio callback URL, attempting TMDB fallback auto-play")
-                    attemptTMDBAutoNextEpisode(currentSeason, currentEpisode)
+                    // No callback URL - return to Stremio for manual selection
+                    android.util.Log.d("PlayerActivityMinimal", "✗ No Stremio callback URL, returning to Stremio")
+                    returnToStremioWithCompletion(currentSeason, currentEpisode)
                 }
             } catch (e: Exception) {
                 android.util.Log.e("PlayerActivityMinimal", "attemptPlayNextEpisode error: ${e.message}")
@@ -360,79 +358,7 @@ class PlayerActivityMinimal : ComponentActivity() {
         }
     }
 
-    /**
-     * Attempt to auto-play next episode using TMDB lookup
-     * This is a fallback when Stremio doesn't provide a callback URL
-     */
-    private suspend fun attemptTMDBAutoNextEpisode(currentSeason: Int, currentEpisode: Int) {
-        try {
-            android.util.Log.d("PlayerActivityMinimal", "→ TMDB Fallback: Looking up next episode S${currentSeason}E${currentEpisode + 1}")
 
-            // Extract show name from URL/filename
-            val showName: String? = if (mediaUrl != null && mediaUrl!!.isNotEmpty()) {
-                tmdbClient.extractShowNameFromUrl(mediaUrl!!)
-            } else null
-
-            if (showName == null || showName.isEmpty()) {
-                android.util.Log.w("PlayerActivityMinimal", "⚠ Could not extract show name from URL, falling back to standard return")
-                returnToStremioWithCompletion(currentSeason, currentEpisode)
-                return
-            }
-
-            android.util.Log.d("PlayerActivityMinimal", "→ Extracted show name: '$showName'")
-
-            // Attempt to fetch next episode stream from TMDB
-            val nextEpisodeStream: String? = withContext(Dispatchers.IO) {
-                tmdbClient.fetchNextEpisodeStreamUrl(showName, currentSeason, currentEpisode + 1)
-            }
-
-            if (nextEpisodeStream != null && nextEpisodeStream.isNotEmpty()) {
-                android.util.Log.d("PlayerActivityMinimal", "✓ TMDB: Found next episode stream, auto-playing S${currentSeason}E${currentEpisode + 1}")
-                playNextEpisodeDirectly(nextEpisodeStream, currentSeason, currentEpisode + 1)
-            } else {
-                android.util.Log.w("PlayerActivityMinimal", "⚠ TMDB: Could not find next episode stream, returning to Stremio")
-                returnToStremioWithCompletion(currentSeason, currentEpisode)
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("PlayerActivityMinimal", "TMDB auto-play error: ${e.message}, falling back to standard return")
-            returnToStremioWithCompletion(currentSeason, currentEpisode)
-        }
-    }
-
-    /**
-     * Play next episode directly without returning to Stremio
-     * Simulates Stremio's auto-play behavior
-     */
-    private suspend fun playNextEpisodeDirectly(
-        nextEpisodeUrl: String,
-        nextSeason: Int,
-        nextEpisode: Int
-    ) {
-        try {
-            android.util.Log.d("PlayerActivityMinimal", "🚀 Auto-playing next episode: S${nextSeason}E${nextEpisode}")
-            android.util.Log.d("PlayerActivityMinimal", "   URL: $nextEpisodeUrl")
-
-            // Create an intent to play the next episode
-            val nextIntent = Intent(Intent.ACTION_VIEW).apply {
-                data = nextEpisodeUrl.toUri()
-                putExtra("season", nextSeason)
-                putExtra("episode", nextEpisode)
-                putExtra("return_result", shouldReturnResult)
-                // Start from beginning of next episode
-                putExtra("startfrom", 0)
-            }
-
-            // Return this intent as result to launch next episode
-            setResult(RESULT_OK, nextIntent)
-            resultIntentAlreadySet = true
-
-            delay(500)
-            finish()
-        } catch (e: Exception) {
-            android.util.Log.e("PlayerActivityMinimal", "Error playing next episode directly: ${e.message}")
-            returnToStremioWithCompletion(nextSeason - 1, nextEpisode - 1)
-        }
-    }
 
     /**
      * Return to Stremio with completion signal

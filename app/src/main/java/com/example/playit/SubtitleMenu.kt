@@ -44,14 +44,26 @@ fun SubtitleMenuPopup(
     onDismiss: () -> Unit
 ) {
     val embeddedSubtitles by viewModel.availableSubtitles.collectAsState()
+    val currentMediaTitle by viewModel.title.collectAsState()
     var searchResults by remember { mutableStateOf<List<SubtitleEntry>>(emptyList()) }
     var searchQuery by remember { mutableStateOf("") }
     var isSearching by remember { mutableStateOf(false) }
     var searchError by remember { mutableStateOf<String?>(null) }
+    var autoFilledOnce by remember { mutableStateOf(false) }
 
     val firstItemFocusRequester = remember { FocusRequester() }
     val searchFieldFocusRequester = remember { FocusRequester() }
+    val searchFieldInteractionSource = remember { MutableInteractionSource() }
+    val isSearchFieldFocused by searchFieldInteractionSource.collectIsFocusedAsState()
     var isOpen by remember { mutableStateOf(true) }
+
+    // Auto-fill search field when focused for the first time
+    LaunchedEffect(isSearchFieldFocused) {
+        if (isSearchFieldFocused && !autoFilledOnce && searchQuery.isEmpty() && currentMediaTitle.isNotEmpty() && currentMediaTitle != "Video Title") {
+            searchQuery = currentMediaTitle
+            autoFilledOnce = true
+        }
+    }
 
     BackHandler(enabled = isOpen) {
         isOpen = false
@@ -132,44 +144,62 @@ fun SubtitleMenuPopup(
                         )
                     )
 
-                    Button(
-                        onClick = {
-                            if (searchQuery.isNotBlank()) {
-                                isSearching = true
-                                searchError = null
-                                searchResults = emptyList()  // Clear previous results
-                                viewModel.searchSubtitles(searchQuery, "en", null, null) { results ->
-                                    isSearching = false
-                                    if (results.isEmpty()) {
-                                        searchError = "No subtitles found for: $searchQuery"
-                                    } else {
-                                        @Suppress("ConvertMapNotNullToMapNotNull")
-                                        val mapped = results.mapNotNull { s ->
-                                            val fileId = s.attributes.files.firstOrNull()?.fileId
-                                            SubtitleEntry(
-                                                fileId = fileId,
-                                                language = s.attributes.language,
-                                                downloadCount = s.attributes.downloadCount,
-                                                source = "opensubtitles",
-                                                localFilePath = null,
-                                                displayLabel = "${s.attributes.language} (${s.attributes.downloadCount} DLs)",
-                                                groupIndex = null,
-                                                trackIndex = null,
-                                                isEmbedded = false
-                                            )
+                    // Search button with focus feedback
+                    val searchButtonInteractionSource = remember { MutableInteractionSource() }
+                    val isSearchButtonFocused by searchButtonInteractionSource.collectIsFocusedAsState()
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(
+                                if (isSearchButtonFocused) Color(0xFFFFFFFF) else Color.Transparent
+                            )
+                            .clickable(
+                                interactionSource = searchButtonInteractionSource,
+                                indication = null,
+                                enabled = !isSearching
+                            ) {
+                                if (searchQuery.isNotBlank()) {
+                                    isSearching = true
+                                    searchError = null
+                                    searchResults = emptyList()  // Clear previous results
+                                    viewModel.searchSubtitles(searchQuery, "en", null, null) { results ->
+                                        isSearching = false
+                                        if (results.isEmpty()) {
+                                            searchError = "No subtitles found for: $searchQuery"
+                                        } else {
+                                            @Suppress("ConvertMapNotNullToMapNotNull")
+                                            val mapped = results.mapNotNull { s ->
+                                                val fileId = s.attributes.files.firstOrNull()?.fileId
+                                                SubtitleEntry(
+                                                    fileId = fileId,
+                                                    language = s.attributes.language,
+                                                    downloadCount = s.attributes.downloadCount,
+                                                    source = "opensubtitles",
+                                                    localFilePath = null,
+                                                    displayLabel = "${s.attributes.language} (${s.attributes.downloadCount} DLs)",
+                                                    groupIndex = null,
+                                                    trackIndex = null,
+                                                    isEmbedded = false
+                                                )
+                                            }
+                                            searchResults = mapped
                                         }
-                                        searchResults = mapped
                                     }
+                                } else {
+                                    searchError = "Please enter a search query"
                                 }
-                            } else {
-                                searchError = "Please enter a search query"
                             }
-                        },
-                        modifier = Modifier.clip(RoundedCornerShape(6.dp)),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0366D6)),
-                        enabled = !isSearching
+                            .focusable(true, searchButtonInteractionSource)
+                            .padding(8.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        SearchButtonIcon()
+                        Icon(
+                            Icons.Default.Search,
+                            contentDescription = "Search",
+                            tint = if (isSearchButtonFocused) Color.Black else Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
                     }
                 }
 
@@ -309,15 +339,5 @@ private fun SubtitleItem(
             fontSize = 14.sp
         )
     }
-}
-
-@Composable
-private fun SearchButtonIcon() {
-    Icon(
-        Icons.Default.Search,
-        contentDescription = "Search",
-        tint = Color.White,
-        modifier = Modifier.size(24.dp)
-    )
 }
 

@@ -241,7 +241,7 @@ class SubtitleRepository(private val context: Context) {
         year: Int? = null
     ): List<Subtitle> = withContext(Dispatchers.IO) {
         val provider = getApiProvider()
-        Log.d("SubtitleRepository", "searchSubtitles: provider=$provider, query='$query', language=$language")
+        Log.d("SubtitleRepository", "searchSubtitles: provider=$provider, query='$query', language=$language, tmdbId=$tmdbId, year=$year")
 
         ensureLoggedIn()
 
@@ -252,31 +252,56 @@ class SubtitleRepository(private val context: Context) {
                     Log.d("SubtitleRepository", "Using OpenSubtitles.org API for search")
                     val orgService = OpenSubtitlesOrgClient.instance
                     val searchParams = mutableMapOf("query" to query, "languages" to language)
-                    tmdbId?.let { searchParams["tmdb_id"] = it }
-                    year?.let { searchParams["year"] = it.toString() }
+                    tmdbId?.let {
+                        searchParams["tmdb_id"] = it
+                        Log.d("SubtitleRepository", "Added tmdb_id: $it")
+                    }
+                    year?.let {
+                        searchParams["year"] = it.toString()
+                        Log.d("SubtitleRepository", "Added year: $it")
+                    }
 
                     Log.d("SubtitleRepository", "Searching with params: $searchParams")
                     val response = orgService.search(searchParams)
-                    Log.d("SubtitleRepository", "OpenSubtitles.org search response: ${response.data?.size ?: 0} results")
+                    val resultCount = response.data?.size ?: 0
+                    Log.d("SubtitleRepository", "OpenSubtitles.org search returned $resultCount results for query='$query'")
 
-                    response.data?.mapNotNull { orgSubtitle ->
-                        // Convert OpenSubtitlesOrgSubtitle to Subtitle format
-                        Subtitle(
-                            id = orgSubtitle.id,
-                            attributes = SubtitleAttributes(
-                                name = orgSubtitle.attributes.name,
-                                language = orgSubtitle.attributes.language,
-                                downloadCount = orgSubtitle.attributes.downloadCount,
-                                uploadCount = orgSubtitle.attributes.uploadCount,
-                                files = orgSubtitle.attributes.files.mapNotNull { file ->
-                                    // Extract file ID from file_id field
-                                    file.file_id?.let { fileId ->
-                                        SubtitleFile(fileId = fileId, fileName = file.fileName)
+                    if (response.data == null) {
+                        Log.w("SubtitleRepository", "Response data is null, returning empty list")
+                        return@withContext emptyList()
+                    }
+
+                    val mapped = response.data!!.mapNotNull { orgSubtitle ->
+                        try {
+                            // Convert OpenSubtitlesOrgSubtitle to Subtitle format
+                            val fileId = orgSubtitle.attributes.files.firstOrNull()?.file_id
+                            if (fileId == null) {
+                                Log.w("SubtitleRepository", "Skipping subtitle ${orgSubtitle.id} - no file_id found")
+                                return@mapNotNull null
+                            }
+
+                            Subtitle(
+                                id = orgSubtitle.id,
+                                attributes = SubtitleAttributes(
+                                    name = orgSubtitle.attributes.name,
+                                    language = orgSubtitle.attributes.language,
+                                    downloadCount = orgSubtitle.attributes.downloadCount,
+                                    uploadCount = orgSubtitle.attributes.uploadCount,
+                                    files = orgSubtitle.attributes.files.mapNotNull { file ->
+                                        file.file_id?.let { fid ->
+                                            SubtitleFile(fileId = fid, fileName = file.fileName ?: "Unknown")
+                                        }
                                     }
-                                }
+                                )
                             )
-                        )
-                    } ?: emptyList()
+                        } catch (e: Exception) {
+                            Log.e("SubtitleRepository", "Error mapping subtitle: ${e.message}", e)
+                            null
+                        }
+                    }
+
+                    Log.d("SubtitleRepository", "Successfully mapped ${mapped.size} subtitles from API response")
+                    mapped
                 }
                 ApiProvider.COM -> {
                     // Use OpenSubtitles.com API (requires authentication)
