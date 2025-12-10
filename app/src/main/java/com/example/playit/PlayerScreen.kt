@@ -185,7 +185,7 @@ fun PlayerScreen(
                 // Filter duplicate key events (some remotes send the same key multiple times very quickly)
                 // Use a shorter window (50ms) so legitimate quick single presses aren't delayed while
                 // still filtering most hardware double-sends.
-                val DUPLICATE_KEY_MS = 5L
+                val DUPLICATE_KEY_MS = 0L
                 val keyCode = native.keyCode
                 if (lastProcessedKeyCode == keyCode && (now - lastProcessedKeyMs) < DUPLICATE_KEY_MS) {
                     Log.d("PlayerScreen", "onPreviewKeyEvent: ignoring duplicate key $keyCode (delta=${now-lastProcessedKeyMs}ms)")
